@@ -61,6 +61,11 @@ channels. Platform-specific code is confined to backend modules inside
 - Phase 1a (`protocol` crate: message types, versioned framing) — done.
   Serialization uses `postcard`, not the originally planned `bincode` — see
   [ADR-0002](adr/0002-postcard-not-bincode.md).
+- Phase 1b (`identity` crate: keypairs, keychain storage, trust store) —
+  done. Keychain integration manually verified on macOS only so far
+  (the only OS available in this environment); Windows/Linux keychain
+  verification remains an open manual-QA item, tracked per the plan's
+  cross-phase QA matrix rather than blocking this phase.
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
 phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

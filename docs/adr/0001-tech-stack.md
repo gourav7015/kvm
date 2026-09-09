@@ -46,7 +46,9 @@ later (every connection encrypted and mutually authenticated).
   the Phase 3b spike in the build plan).
 - **Clipboard: `arboard`** for cross-platform read/write, plus a per-OS
   change-watcher/poll loop for detecting copy events.
-- **Serialization: `bincode`** over a small versioned message framing,
+- **Serialization: `postcard`** *(originally `bincode`; superseded by
+  [ADR-0002](0002-postcard-not-bincode.md) after `bincode` was flagged
+  unmaintained — RUSTSEC-2025-0141)* over a small versioned message framing,
   defined in a dependency-free `protocol` crate (no I/O), so the wire format
   can evolve without breaking already-paired peers.
 - **Async runtime: `tokio`**, required by `quinn` in any case.

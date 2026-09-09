@@ -57,6 +57,10 @@ channels. Platform-specific code is confined to backend modules inside
 
 ## Status
 
-Phase 0 (project skeleton + CI) in progress. See
-`/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full phase
-breakdown, per-phase Definition of Done, risk register, and QA matrix.
+- Phase 0 (project skeleton + CI) — done.
+- Phase 1a (`protocol` crate: message types, versioned framing) — done.
+  Serialization uses `postcard`, not the originally planned `bincode` — see
+  [ADR-0002](adr/0002-postcard-not-bincode.md).
+
+See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
+phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

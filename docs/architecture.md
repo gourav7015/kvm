@@ -65,6 +65,20 @@ channels. Platform-specific code is confined to backend modules inside
   code, automated tests, and CI all green, but the phase's own DoD requires
   keychain integration manually verified on all 3 OSes, and only macOS has
   been done. **Phase 1b is not closed.** Tracked below.
+- Phase 1c (`net` crate: QUIC transport, TLS mutual auth, multiplexed
+  streams, heartbeat/reconnect) — code, automated tests (loopback
+  multi-stream, simulated packet-loss/latency via a UDP relay, forced-kill
+  detection + backoff, untrusted-peer/revoked-device rejection, replayed-
+  handshake rejection), and CI all green. But the phase's own DoD requires
+  a real cross-machine LAN test, not just loopback, and this environment
+  only has one machine. **Phase 1c is not closed.** Tracked below. A
+  ready-to-run manual test exists at `crates/net/examples/lan_peer.rs`
+  (usage documented in its own doc comment) and has been smoke-tested over
+  loopback, but not yet run across two real machines.
+  Serialization: identity uses self-signed X.509 certs (via `rcgen`) built
+  from the existing Ed25519 keypair, verified by a custom rustls verifier
+  that pins the embedded public key against the trust store rather than
+  any CA chain — see [ADR-0003](adr/0003-net-tls-and-stream-design.md).
 
 ### Open manual QA (blocking phase closure)
 
@@ -73,6 +87,7 @@ channels. Platform-specific code is confined to backend modules inside
 | macOS Keychain round-trip (`kvm-identity`, `cargo test -- --ignored`) | ✅ verified 2026-09-09 |
 | Windows Credential Manager round-trip | ⏳ pending — needs a Windows environment |
 | Linux Secret Service round-trip | ⏳ pending — needs a Linux environment with a Secret Service daemon |
+| Real cross-machine LAN test (`kvm-net`, `examples/lan_peer.rs`) | ⏳ pending — needs a second machine on the same LAN |
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
 phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

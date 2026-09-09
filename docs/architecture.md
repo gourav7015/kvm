@@ -62,31 +62,42 @@ channels. Platform-specific code is confined to backend modules inside
   Serialization uses `postcard`, not the originally planned `bincode` — see
   [ADR-0002](adr/0002-postcard-not-bincode.md).
 - Phase 1b (`identity` crate: keypairs, keychain storage, trust store) —
-  code, automated tests, and CI all green, but the phase's own DoD requires
+  code and automated tests green, but the phase's own DoD requires
   keychain integration manually verified on all 3 OSes, and only macOS has
-  been done. **Phase 1b is not closed.** Tracked below.
+  been done. **🟡 Phase 1b is OPEN.** Tracked below.
 - Phase 1c (`net` crate: QUIC transport, TLS mutual auth, multiplexed
-  streams, heartbeat/reconnect) — code, automated tests (loopback
+  streams, heartbeat/reconnect) — code and automated tests green (loopback
   multi-stream, simulated packet-loss/latency via a UDP relay, forced-kill
   detection + backoff, untrusted-peer/revoked-device rejection, replayed-
-  handshake rejection), and CI all green. But the phase's own DoD requires
-  a real cross-machine LAN test, not just loopback, and this environment
-  only has one machine. **Phase 1c is not closed.** Tracked below. A
-  ready-to-run manual test exists at `crates/net/examples/lan_peer.rs`
-  (usage documented in its own doc comment) and has been smoke-tested over
-  loopback, but not yet run across two real machines.
-  Serialization: identity uses self-signed X.509 certs (via `rcgen`) built
-  from the existing Ed25519 keypair, verified by a custom rustls verifier
-  that pins the embedded public key against the trust store rather than
-  any CA chain — see [ADR-0003](adr/0003-net-tls-and-stream-design.md).
+  handshake rejection). CI status on the latest push is being confirmed.
+  The phase's own DoD requires a real cross-machine LAN test, not just
+  loopback, and this environment has only one machine. **🟡 Phase 1c is
+  OPEN.** Tracked below. A ready-to-run manual test exists at
+  `crates/net/examples/lan_peer.rs` (usage documented in its own doc
+  comment) and has been smoke-tested over loopback, but not yet run
+  across two real machines.
+  Identity uses self-signed X.509 certs (via `rcgen`) built from the
+  existing Ed25519 keypair, verified by a custom rustls verifier that
+  pins the embedded public key against the trust store rather than any CA
+  chain — see [ADR-0003](adr/0003-net-tls-and-stream-design.md).
 
 ### Open manual QA (blocking phase closure)
+
+Two independent gates — closing one does not close the other.
+
+**Phase 1b — `identity` keychain integration:**
 
 | Item | Status |
 |---|---|
 | macOS Keychain round-trip (`kvm-identity`, `cargo test -- --ignored`) | ✅ verified 2026-09-09 |
 | Windows Credential Manager round-trip | ⏳ pending — needs a Windows environment |
 | Linux Secret Service round-trip | ⏳ pending — needs a Linux environment with a Secret Service daemon |
+
+**Phase 1c — `net` real-network behavior:**
+
+| Item | Status |
+|---|---|
+| CI green on latest push (build/test/clippy/fmt/deny, all 3 OS runners) | ⏳ confirming |
 | Real cross-machine LAN test (`kvm-net`, `examples/lan_peer.rs`) | ⏳ pending — needs a second machine on the same LAN |
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full

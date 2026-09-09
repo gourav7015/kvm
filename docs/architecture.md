@@ -62,10 +62,17 @@ channels. Platform-specific code is confined to backend modules inside
   Serialization uses `postcard`, not the originally planned `bincode` — see
   [ADR-0002](adr/0002-postcard-not-bincode.md).
 - Phase 1b (`identity` crate: keypairs, keychain storage, trust store) —
-  done. Keychain integration manually verified on macOS only so far
-  (the only OS available in this environment); Windows/Linux keychain
-  verification remains an open manual-QA item, tracked per the plan's
-  cross-phase QA matrix rather than blocking this phase.
+  code, automated tests, and CI all green, but the phase's own DoD requires
+  keychain integration manually verified on all 3 OSes, and only macOS has
+  been done. **Phase 1b is not closed.** Tracked below.
+
+### Open manual QA (blocking phase closure)
+
+| Item | Status |
+|---|---|
+| macOS Keychain round-trip (`kvm-identity`, `cargo test -- --ignored`) | ✅ verified 2026-09-09 |
+| Windows Credential Manager round-trip | ⏳ pending — needs a Windows environment |
+| Linux Secret Service round-trip | ⏳ pending — needs a Linux environment with a Secret Service daemon |
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
 phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

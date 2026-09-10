@@ -63,13 +63,13 @@ channels. Platform-specific code is confined to backend modules inside
   [ADR-0002](adr/0002-postcard-not-bincode.md).
 - Phase 1b (`identity` crate: keypairs, keychain storage, trust store) —
   code and automated tests green. Keychain integration manually verified
-  on macOS (this session) and Windows (user-reported: real ignored
-  integration test run against Windows Credential Manager, 2026-09-10).
-  Linux Secret Service round-trip remains untested — no environment or
-  report has covered it. **🟡 Phase 1b carries one open item (Linux
-  keychain)**, explicitly not treated as blocking further phases per
-  2026-09-10 direction — tracked below so it isn't lost, not because it
-  stopped mattering.
+  on all 3 OSes: macOS (this session), Windows (user-reported, 2026-09-10),
+  and Linux (user-reported, 2026-09-10 — Ubuntu 24.04.4 LTS/GNOME,
+  `gnome-keyring-daemon` confirmed as the `org.freedesktop.secrets`
+  provider via `busctl`; `keyring` 4.2.0's Linux path has no fallback
+  store — verified against its actual source — so a passing test there
+  can only mean the real Secret Service was used). **🟢 Phase 1b is
+  CLOSED.**
 - Phase 1c (`net` crate: QUIC transport, TLS mutual auth, multiplexed
   streams, heartbeat/reconnect) — code and automated tests green, CI green
   on all 3 OS runners. Real cross-machine LAN test completed 2026-09-10:
@@ -81,8 +81,7 @@ channels. Platform-specific code is confined to backend modules inside
   existing Ed25519 keypair, verified by a custom rustls verifier that
   pins the embedded public key against the trust store rather than any CA
   chain — see [ADR-0003](adr/0003-net-tls-and-stream-design.md).
-- Phase 2 (discovery + pairing) — **code and automated tests done; real
-  multi-machine manual QA still open.** Pairing: `protocol` gained a
+- Phase 2 (discovery + pairing) — **🟢 CLOSED.** Pairing: `protocol` gained a
   `Pairing` message concern, `identity` gained `pairing_code` (a pure,
   human-comparable code derived from two device IDs, no wire
   transmission), `net` gained `connect_for_pairing`/`accept_for_pairing`
@@ -108,27 +107,29 @@ channels. Platform-specific code is confined to backend modules inside
   (2) the mDNS host name was built from the full 64-char hex device_id,
   silently exceeding DNS's 63-byte label limit and breaking address
   record resolution with no visible error — [ADR-0006](adr/0006-mdns-hostname-dns-label-limit.md).
-  **What's still open:** the DoD's "mDNS-only, UDP-fallback-only, and
-  manual-IP-only paths each manually verified" calls for real separate
-  machines on a real LAN (real routers/Wi-Fi/multicast behavior that
-  loopback cannot exercise) — this environment has one machine. A
-  ready-to-run manual tool exists at `crates/discovery/examples/discover.rs`
-  and has been smoke-tested over loopback (mDNS path confirmed working
-  end-to-end; UDP broadcast's core send/recv/encode/decode is covered by
-  dedicated automated tests, since two example processes on one machine
-  can't share the broadcast port the way two real machines would).
+  Real cross-machine discovery (`crates/discovery/examples/discover.rs`)
+  completed 2026-09-10, both directions, Mac ↔ Windows: mDNS and UDP
+  broadcast each confirmed working both ways, with exact `device_id`
+  match, real routable LAN addresses, and correct ports. Discovery ≠
+  trust confirmed both structurally (`kvm-discovery` has no production
+  dependency on `kvm-identity`; the only `TrustStore::trust()` call site
+  in the workspace is `core::pairing_session::commit_if_completed`, gated
+  behind `PairingState::Completed`) and empirically (no trust-store file
+  touched during either discovery round). One non-blocking gap noted, not
+  a DoD violation: UDP broadcast events aren't deduplicated by `device_id`
+  at the crate level — a future `core` device list will need to do that.
 
-### Open manual QA (not blocking further phases, but tracked)
+### Manual QA record (all closed)
 
 | Item | Status |
 |---|---|
 | macOS Keychain round-trip (`kvm-identity`, `cargo test -- --ignored`) | ✅ verified 2026-09-09 |
 | Windows Credential Manager round-trip | ✅ verified 2026-09-10 (user-run, real ignored integration test) |
-| Linux Secret Service round-trip | ⏳ pending — needs a Linux environment with a Secret Service daemon |
+| Linux Secret Service round-trip | ✅ verified 2026-09-10 — Ubuntu 24.04.4 LTS, GNOME, `gnome-keyring-daemon` (PID confirmed via `busctl --user list`) |
 | Real cross-machine LAN test (`kvm-net`, `examples/lan_peer.rs`) | ✅ verified 2026-09-10 — Windows listener ↔ macOS connector |
-| mDNS discovery across real separate machines (`kvm-discovery`, `examples/discover.rs`) | ⏳ pending — needs a second machine on the same LAN |
-| UDP broadcast discovery across real separate machines | ⏳ pending — needs a second machine on the same LAN |
-| Manual IP entry path | ⏳ pending — trivial in isolation, but worth confirming alongside the above two on real hardware |
+| mDNS discovery across real separate machines (`kvm-discovery`, `examples/discover.rs`) | ✅ verified 2026-09-10 — both directions, Mac↔Windows |
+| UDP broadcast discovery across real separate machines | ✅ verified 2026-09-10 — both directions, Mac↔Windows |
+| Manual IP entry path | ✅ covered by the Phase 1c LAN test (`lan_peer.rs` uses a directly-supplied address, no discovery involved) plus `DiscoveredDevice::manual`'s unit test |
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
 phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

@@ -174,12 +174,23 @@ mod real {
         println!("injecting incoming input events (Ctrl+C here to stop)...");
         loop {
             match peer.streams.input.recv().await {
-                Ok(Message::Input(event)) => {
-                    let event = translate_for_local_platform(event);
+                Ok(Message::Input(received)) => {
+                    let translated = translate_for_local_platform(received.clone());
                     let started = Instant::now();
-                    match inject.inject(&event) {
-                        Ok(()) => println!("injected {event:?} in {:?}", started.elapsed()),
-                        Err(e) => eprintln!("injection failed for {event:?}: {e}"),
+                    match inject.inject(&translated) {
+                        Ok(()) => {
+                            if translated == received {
+                                println!("injected {translated:?} in {:?}", started.elapsed());
+                            } else {
+                                println!(
+                                    "received {received:?} -> translated+injected {translated:?} in {:?}",
+                                    started.elapsed()
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("injection failed for {received:?} -> {translated:?}: {e}")
+                        }
                     }
                 }
                 Ok(other) => eprintln!("unexpected message on input stream: {other:?}"),

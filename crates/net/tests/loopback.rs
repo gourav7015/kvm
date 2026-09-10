@@ -6,8 +6,8 @@
 mod support;
 
 use kvm_protocol::{
-    ButtonState, ClipboardContent, ClipboardMessage, ControlMessage, InputMessage, Message,
-    MouseButton, TransferMessage,
+    ButtonState, ClipboardContent, ClipboardMessage, ControlMessage, InputMessage, Key, Message,
+    MouseButton, PlatformKind, TransferMessage,
 };
 
 #[tokio::test]
@@ -42,8 +42,10 @@ async fn exchanges_a_message_on_every_concern_stream_both_directions() {
 
     // Input
     let key = Message::Input(InputMessage::Key {
-        keycode: 65,
+        key: Key::A,
         state: ButtonState::Pressed,
+        repeat: false,
+        source_os: PlatformKind::MacOs,
     });
     peer_a.streams.input.send(&key).await.unwrap();
     assert_eq!(peer_b.streams.input.recv().await.unwrap(), key);

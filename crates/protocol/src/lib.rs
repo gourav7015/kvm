@@ -12,6 +12,7 @@ pub use error::ProtocolError;
 pub use framing::{DecodeStatus, MAX_FRAME_PAYLOAD_SIZE, decode_frame, encode_frame};
 pub use message::{
     ButtonState, ClipboardContent, ClipboardMessage, ControlMessage, DeviceId, HandshakeMessage,
-    InputMessage, Message, MouseButton, PairingMessage, TransferId, TransferMessage,
+    InputMessage, Key, Message, MouseButton, PairingMessage, PlatformKind, TransferId,
+    TransferMessage,
 };
 pub use version::{PROTOCOL_MAJOR, PROTOCOL_MINOR, is_compatible};

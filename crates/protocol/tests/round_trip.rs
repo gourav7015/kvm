@@ -6,8 +6,8 @@
 
 use kvm_protocol::{
     ButtonState, ClipboardContent, ClipboardMessage, ControlMessage, DecodeStatus,
-    HandshakeMessage, InputMessage, Message, MouseButton, PairingMessage, TransferMessage,
-    decode_frame, encode_frame,
+    HandshakeMessage, InputMessage, Key, Message, MouseButton, PairingMessage, PlatformKind,
+    TransferMessage, decode_frame, encode_frame,
 };
 use proptest::prelude::*;
 
@@ -48,10 +48,58 @@ fn arb_control() -> impl Strategy<Value = Message> {
     ]
 }
 
+fn arb_key() -> impl Strategy<Value = Key> {
+    prop_oneof![
+        Just(Key::A),
+        Just(Key::Z),
+        Just(Key::Digit0),
+        Just(Key::Digit9),
+        Just(Key::ShiftLeft),
+        Just(Key::ShiftRight),
+        Just(Key::ControlLeft),
+        Just(Key::ControlRight),
+        Just(Key::AltLeft),
+        Just(Key::AltRight),
+        Just(Key::MetaLeft),
+        Just(Key::MetaRight),
+        Just(Key::CapsLock),
+        Just(Key::F1),
+        Just(Key::F12),
+        Just(Key::ArrowUp),
+        Just(Key::Enter),
+        Just(Key::Escape),
+        Just(Key::Backspace),
+        Just(Key::Delete),
+        Just(Key::Tab),
+        Just(Key::Space),
+        any::<u32>().prop_map(Key::Unknown),
+    ]
+}
+
+fn arb_platform_kind() -> impl Strategy<Value = PlatformKind> {
+    prop_oneof![
+        Just(PlatformKind::MacOs),
+        Just(PlatformKind::Windows),
+        Just(PlatformKind::Linux),
+    ]
+}
+
 fn arb_input() -> impl Strategy<Value = Message> {
     prop_oneof![
-        (any::<u32>(), arb_button_state())
-            .prop_map(|(keycode, state)| Message::Input(InputMessage::Key { keycode, state })),
+        (
+            arb_key(),
+            arb_button_state(),
+            any::<bool>(),
+            arb_platform_kind()
+        )
+            .prop_map(|(key, state, repeat, source_os)| Message::Input(
+                InputMessage::Key {
+                    key,
+                    state,
+                    repeat,
+                    source_os,
+                }
+            )),
         (any::<i32>(), any::<i32>())
             .prop_map(|(dx, dy)| Message::Input(InputMessage::MouseMove { dx, dy })),
         (arb_mouse_button(), arb_button_state()).prop_map(|(button, state)| {

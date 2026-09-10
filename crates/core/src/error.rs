@@ -11,6 +11,9 @@ pub enum CoreError {
     Identity(#[from] kvm_identity::IdentityError),
 
     #[error(transparent)]
+    Input(#[from] kvm_input::InputError),
+
+    #[error(transparent)]
     Pairing(#[from] crate::pairing::PairingError),
 
     /// A message arrived where a specific [`kvm_protocol::PairingMessage`]

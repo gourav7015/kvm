@@ -10,7 +10,7 @@ mod transfer;
 pub use clipboard::{ClipboardContent, ClipboardMessage};
 pub use control::ControlMessage;
 pub use handshake::{DeviceId, HandshakeMessage};
-pub use input::{ButtonState, InputMessage, MouseButton};
+pub use input::{ButtonState, InputMessage, Key, MouseButton, PlatformKind};
 pub use pairing::PairingMessage;
 pub use transfer::{TransferId, TransferMessage};
 

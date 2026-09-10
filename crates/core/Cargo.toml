@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 kvm-identity = { version = "0.1.0", path = "../identity" }
+kvm-input = { version = "0.1.0", path = "../input" }
 kvm-net = { version = "0.1.0", path = "../net" }
 kvm-protocol = { version = "0.1.0", path = "../protocol" }
 thiserror = "2.0.20"

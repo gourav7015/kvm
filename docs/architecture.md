@@ -119,6 +119,29 @@ channels. Platform-specific code is confined to backend modules inside
   a DoD violation: UDP broadcast events aren't deduplicated by `device_id`
   at the crate level — a future `core` device list will need to do that.
 
+- Phase 3 (input engine, macOS↔Windows target pair) — **🟡 code and
+  automated tests green; manual on-hardware QA still OPEN, so this phase
+  is not yet closed.** `protocol` gained a normalized `Key`/`PlatformKind`
+  instead of a raw OS keycode; `input` gained the `Capture`/`Inject`
+  trait boundary, a pure OS-independent modifier-translation function
+  (the killer feature: Command↔Control swap only when exactly one side
+  is macOS, everything else passes through), a macOS backend
+  (`CGEventTap`/`CGEvent::post`, `AXIsProcessTrusted`-gated), and a
+  Windows backend (`WH_KEYBOARD_LL`/`WH_MOUSE_LL` hooks, `SendInput`,
+  compile-verified via `cargo check --target x86_64-pc-windows-msvc`
+  since this environment has no Windows machine to build on directly).
+  `core` gained a small `input_bridge` module bridging `Capture`/`Inject`
+  to an existing `Peer`'s `input` stream — no new networking or trust
+  path; input only ever flows over an already-authenticated connection.
+  A loopback integration test proves the full
+  capture→normalize→serialize→transport→deserialize→inject pipeline with
+  fake `Capture`/`Inject` doubles standing in for the OS ends (CI has no
+  physical keyboard/mouse). See
+  [ADR-0007](adr/0007-input-architecture.md) for the full design
+  rationale, including why Linux capture is deferred to Phase 3b (a
+  dedicated X11-vs-Wayland go/no-go decision, not silently skipped).
+  Manual QA procedure: `docs/manual-qa/phase-3-input.md`.
+
 ### Manual QA record (all closed)
 
 | Item | Status |
@@ -130,6 +153,24 @@ channels. Platform-specific code is confined to backend modules inside
 | mDNS discovery across real separate machines (`kvm-discovery`, `examples/discover.rs`) | ✅ verified 2026-09-10 — both directions, Mac↔Windows |
 | UDP broadcast discovery across real separate machines | ✅ verified 2026-09-10 — both directions, Mac↔Windows |
 | Manual IP entry path | ✅ covered by the Phase 1c LAN test (`lan_peer.rs` uses a directly-supplied address, no discovery involved) plus `DiscoveredDevice::manual`'s unit test |
+
+### Manual QA record — Phase 3 (OPEN)
+
+Automated tests (translation table, keycode round-trips, loopback
+capture→inject pipeline) are green, but none of these require the real
+Mac/Windows hardware this table is about — a green build is not
+evidence for any row below. Procedure: `docs/manual-qa/phase-3-input.md`.
+
+| Item | Status |
+|---|---|
+| macOS Accessibility-permission-missing path (clear error, no panic, no silent no-op) | ⬜ OPEN — not yet run on the real Mac |
+| macOS keyboard capture/injection (letters, modifiers incl. left/right, function keys) | ⬜ OPEN |
+| macOS mouse capture/injection (move, click, drag, scroll) | ⬜ OPEN |
+| Windows keyboard capture/injection | ⬜ OPEN |
+| Windows mouse capture/injection | ⬜ OPEN |
+| Windows UAC/elevated-window behavior (documented limitation in ADR-0007 §5, not yet observed firsthand) | ⬜ OPEN |
+| Cmd↔Ctrl / Option↔Alt translation feels native end-to-end, Mac↔Windows both directions | ⬜ OPEN |
+| End-to-end input latency measured and logged (`examples/input_relay.rs`) | ⬜ OPEN |
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
 phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

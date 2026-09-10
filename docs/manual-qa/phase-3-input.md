@@ -63,7 +63,8 @@ listener's log, matching real physical key presses on the Mac.
 | Enter, Backspace, Escape, Space | PASS |
 | Tab | PASS — flagged ambiguous mid-session (unclear during a busy, log-flooded multi-category test, same readability issue the F-key retest below ran into), then confirmed cleanly with a dedicated isolated retest (Tab alone, nothing else) |
 | Arrow keys (Up/Down/Left/Right) | PASS |
-| Function keys F1–F5 | PASS — isolated retest confirmed `Key::F1`..`Key::F5` exactly; one stray `Unknown(176)` between F4/F5 was an incidental extra keypress, not a mapping error |
+| Function keys F1–F5 | PASS — isolated retest confirmed `Key::F1`..`Key::F5` exactly; one stray `Unknown(176)` between F4/F5 confirmed to be an incidental press of the `fn`/Globe key, not an F-key mapping error |
+| `fn`/Globe key | PASS (correctly `Key::Unknown(code)`) — not in Phase 3's supported key set by design (not one of the keys the DoD lists: letters, digits, modifiers, F1–F12, arrows, common editing keys); an unmapped key becoming `Unknown` rather than being dropped or misrepresented is the intended, documented behavior |
 | Delete (forward-delete) | NOT TESTED — this MacBook's keyboard has one physical key (Backspace); forward-delete needs Fn+Delete, not tried |
 | Mouse move | PASS |
 | Mouse scroll | PASS |

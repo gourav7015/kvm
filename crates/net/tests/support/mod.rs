@@ -18,6 +18,7 @@ pub struct Device {
     pub device_id: DeviceId,
     pub endpoint: quinn::Endpoint,
     pub addr: SocketAddr,
+    seed: [u8; 32],
     trusted: Arc<Mutex<HashSet<DeviceId>>>,
 }
 
@@ -63,6 +64,7 @@ impl Device {
             device_id,
             endpoint,
             addr,
+            seed,
             trusted,
         }
     }
@@ -73,6 +75,13 @@ impl Device {
 
     pub fn untrust(&self, device_id: &DeviceId) {
         self.trusted.lock().unwrap().remove(device_id);
+    }
+
+    /// Rebuilds this device's identity certificate on demand — used for
+    /// pairing-mode connect/accept, which each build their own one-off
+    /// config rather than using the endpoint's default.
+    pub fn identity_cert(&self) -> IdentityCert {
+        IdentityCert::from_seed(&self.seed).unwrap()
     }
 }
 

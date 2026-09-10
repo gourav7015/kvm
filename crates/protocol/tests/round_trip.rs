@@ -6,8 +6,8 @@
 
 use kvm_protocol::{
     ButtonState, ClipboardContent, ClipboardMessage, ControlMessage, DecodeStatus,
-    HandshakeMessage, InputMessage, Message, MouseButton, TransferMessage, decode_frame,
-    encode_frame,
+    HandshakeMessage, InputMessage, Message, MouseButton, PairingMessage, TransferMessage,
+    decode_frame, encode_frame,
 };
 use proptest::prelude::*;
 
@@ -102,6 +102,16 @@ fn arb_transfer() -> impl Strategy<Value = Message> {
     ]
 }
 
+fn arb_pairing() -> impl Strategy<Value = Message> {
+    prop_oneof![
+        proptest::option::of(".*")
+            .prop_map(|label| Message::Pairing(PairingMessage::Request { label })),
+        Just(Message::Pairing(PairingMessage::Accept)),
+        Just(Message::Pairing(PairingMessage::Reject)),
+        Just(Message::Pairing(PairingMessage::Cancel)),
+    ]
+}
+
 /// Any valid `Message`, across every concern.
 fn arb_message() -> impl Strategy<Value = Message> {
     prop_oneof![
@@ -110,6 +120,7 @@ fn arb_message() -> impl Strategy<Value = Message> {
         arb_input(),
         arb_clipboard(),
         arb_transfer(),
+        arb_pairing(),
     ]
 }
 

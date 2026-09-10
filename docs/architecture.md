@@ -81,6 +81,27 @@ channels. Platform-specific code is confined to backend modules inside
   existing Ed25519 keypair, verified by a custom rustls verifier that
   pins the embedded public key against the trust store rather than any CA
   chain — see [ADR-0003](adr/0003-net-tls-and-stream-design.md).
+- Phase 2 (discovery + pairing) — **in progress.** The pairing side is
+  done: `protocol` gained a `Pairing` message concern, `identity` gained
+  `pairing_code` (a pure, human-comparable code derived from two device
+  IDs, no wire transmission), `net` gained `connect_for_pairing`/
+  `accept_for_pairing` (a deliberately permissive TLS mode used only for
+  first contact — see [ADR-0004](adr/0004-pairing-model.md)), and `core`
+  now has its first real content: a pure pairing state machine plus the
+  async glue driving it over a real `Peer`. An end-to-end loopback test
+  proves the full chain: two devices starting completely untrusted
+  converge on matching pairing codes, commit trust into real (file-backed)
+  `TrustStore`s on both sides, and an ordinary post-pairing connection
+  then succeeds with no further pairing step.
+  While building that end-to-end test, found and fixed a real security
+  gap: rustls issues TLS 1.3 session tickets by default, which let a
+  revoked device keep reconnecting via a resumed session that skipped
+  full certificate re-verification — see
+  [ADR-0005](adr/0005-disable-tls-session-resumption.md).
+  **Still not started:** the `discovery` crate itself (mDNS + UDP
+  broadcast fallback + manual IP) — nothing currently *finds* a peer to
+  pair with; the pairing machinery above has only been exercised against
+  addresses supplied directly in tests.
 
 ### Open manual QA (not blocking further phases, but tracked)
 

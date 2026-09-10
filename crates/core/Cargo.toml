@@ -8,3 +8,12 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+kvm-identity = { version = "0.1.0", path = "../identity" }
+kvm-net = { version = "0.1.0", path = "../net" }
+kvm-protocol = { version = "0.1.0", path = "../protocol" }
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+
+[dev-dependencies]
+quinn = "0.11.11"
+tempfile = "3.27.0"

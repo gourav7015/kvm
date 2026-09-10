@@ -99,6 +99,15 @@ pub fn server_config(
         )
         .map_err(|e| NetError::Identity(e.to_string()))?;
     rustls_config.alpn_protocols = vec![ALPN_PROTOCOL.to_vec()];
+    // Session resumption would let a client skip the client-cert
+    // verifier entirely on a later connection by reusing an
+    // already-issued ticket — which would mean a revoked device could
+    // keep reconnecting until its cached ticket happened to expire. Our
+    // trust store can change between any two connections, so every
+    // connection must run the verifier fresh. rustls's default of 2 is
+    // built for the (unrelated) common case where resumption is a safe
+    // perf optimization because trust doesn't change per-connection.
+    rustls_config.send_tls13_tickets = 0;
 
     let quic_config = quinn::crypto::rustls::QuicServerConfig::try_from(rustls_config)
         .map_err(|e| NetError::Identity(e.to_string()))?;

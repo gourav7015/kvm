@@ -937,6 +937,15 @@ version = "0.1.0"
 [[package]]
 name = "kvm-core"
 version = "0.1.0"
+dependencies = [
+ "kvm-identity",
+ "kvm-net",
+ "kvm-protocol",
+ "quinn",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "kvm-discovery"
@@ -953,6 +962,7 @@ dependencies = [
  "kvm-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
 ]

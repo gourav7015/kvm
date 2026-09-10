@@ -16,7 +16,7 @@ pub use config::{DEFAULT_KEEP_ALIVE_INTERVAL, DEFAULT_MAX_IDLE_TIMEOUT, IGNORED_
 pub use endpoint::{new_endpoint, new_endpoint_with_timeouts};
 pub use error::NetError;
 pub use framed::MessageStream;
-pub use peer::{Peer, accept, connect};
+pub use peer::{Peer, accept, accept_for_pairing, connect, connect_for_pairing};
 pub use reconnect::connect_with_backoff;
 pub use streams::Streams;
 pub use tls::{IdentityCert, TrustCheck};

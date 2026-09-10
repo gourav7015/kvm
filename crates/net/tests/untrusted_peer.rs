@@ -99,3 +99,53 @@ async fn revoked_device_is_rejected_even_though_it_was_previously_trusted() {
     );
     assert!(accept_task.await.unwrap().is_err());
 }
+
+#[tokio::test]
+async fn revocation_is_not_bypassed_by_a_resumed_tls_session() {
+    // Regression test: TLS 1.3 session resumption (tickets issued after
+    // a successful handshake) skips full certificate re-verification by
+    // design — that's the whole performance point of resumption. Our
+    // trust store can change between any two connections, so a resumed
+    // session must not be able to skip the verifier. This differs from
+    // `revoked_device_is_rejected_even_though_it_was_previously_trusted`
+    // above: that test revokes *before* any connection ever succeeds, so
+    // it never exercises a real issued-ticket scenario. This one
+    // deliberately completes a full successful connection first (so a
+    // ticket would have been issued under rustls's old default of 2),
+    // *then* revokes, proving the fix in `config::server_config`
+    // (`send_tls13_tickets = 0`) actually closes the gap rather than
+    // just happening to not be hit by the other test.
+    let (a, b) = support::mutually_trusting_pair([16u8; 32], [17u8; 32]);
+
+    // First connection: fully succeeds while trust is mutual.
+    let accept_task = spawn_accept(&b).await;
+    let addr = b.addr;
+    let our_id = a.device_id;
+    let endpoint = a.endpoint.clone();
+    tokio::spawn(async move { kvm_net::connect(&endpoint, addr, our_id).await })
+        .await
+        .unwrap()
+        .expect("first connection must succeed while trust is mutual");
+    accept_task
+        .await
+        .unwrap()
+        .expect("first connection must succeed while trust is mutual");
+
+    // Now revoke, and connect again immediately — if a session ticket
+    // from the first connection were honored, this would wrongly
+    // succeed via resumption instead of a fresh, fully-verified
+    // handshake.
+    a.untrust(&b.device_id);
+    let accept_task = spawn_accept(&b).await;
+    let endpoint = a.endpoint.clone();
+    let connect_result =
+        tokio::spawn(async move { kvm_net::connect(&endpoint, addr, our_id).await })
+            .await
+            .unwrap();
+
+    assert!(
+        connect_result.is_err(),
+        "a revoked device must be rejected even via a connection that could resume a prior session"
+    );
+    assert!(accept_task.await.unwrap().is_err());
+}

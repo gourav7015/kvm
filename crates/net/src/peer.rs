@@ -4,13 +4,14 @@
 //! TLS actually verified, before the connection is handed to callers.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use kvm_protocol::{ControlMessage, DeviceId, HandshakeMessage, Message};
+use kvm_protocol::{ControlMessage, DeviceId, HandshakeMessage, Message, PairingMessage};
 
 use crate::config;
 use crate::error::NetError;
 use crate::streams::{self, Streams};
-use crate::tls::extract_device_id;
+use crate::tls::{IdentityCert, TrustCheck, extract_device_id};
 
 /// An established, mutually-authenticated connection to one peer.
 pub struct Peer {
@@ -31,6 +32,28 @@ impl Peer {
             Message::Control(control) => Ok(control),
             other => Err(NetError::ProtocolViolation(format!(
                 "expected a Control message on the control stream, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Sends a pairing message on the control stream. Only meaningful on
+    /// a connection established via [`connect_for_pairing`]/
+    /// [`accept_for_pairing`] — a normal connection's peer has no reason
+    /// to expect one.
+    pub async fn send_pairing(&mut self, message: &PairingMessage) -> Result<(), NetError> {
+        self.streams
+            .control
+            .send(&Message::Pairing(message.clone()))
+            .await
+    }
+
+    /// Reads the next message on the control stream, rejecting anything
+    /// other than a [`PairingMessage`]. Pairs with [`Peer::send_pairing`].
+    pub async fn recv_pairing(&mut self) -> Result<PairingMessage, NetError> {
+        match self.streams.control.recv().await? {
+            Message::Pairing(pairing) => Ok(pairing),
+            other => Err(NetError::ProtocolViolation(format!(
+                "expected a Pairing message on the control stream, got {other:?}"
             ))),
         }
     }
@@ -59,6 +82,60 @@ pub async fn accept(incoming: quinn::Incoming, our_device_id: DeviceId) -> Resul
     let connection = incoming
         .await
         .map_err(|e| NetError::Transport(e.to_string()))?;
+    finish_handshake(connection, our_device_id, false).await
+}
+
+/// Dials out for pairing (see ADR-0004): completes a real TLS handshake
+/// — the peer must still prove possession of whatever key it presents —
+/// but skips the trust-store check entirely for this one connection.
+/// Trust is granted later, only if the pairing exchange (over the
+/// resulting [`Peer`]) succeeds. Never use this for an ordinary
+/// reconnect to an already-trusted device — use [`connect`].
+pub async fn connect_for_pairing(
+    endpoint: &quinn::Endpoint,
+    addr: SocketAddr,
+    our_device_id: DeviceId,
+    identity: &IdentityCert,
+) -> Result<Peer, NetError> {
+    let permissive: TrustCheck = Arc::new(|_device_id| true);
+    let client_cfg = config::client_config(
+        identity,
+        permissive,
+        config::DEFAULT_MAX_IDLE_TIMEOUT,
+        config::DEFAULT_KEEP_ALIVE_INTERVAL,
+    )?;
+    let connecting = endpoint
+        .connect_with(client_cfg, addr, config::IGNORED_SERVER_NAME)
+        .map_err(|e| NetError::Transport(e.to_string()))?;
+    let connection = connecting
+        .await
+        .map_err(|e| NetError::Transport(e.to_string()))?;
+
+    finish_handshake(connection, our_device_id, true).await
+}
+
+/// Accepts an incoming connection for pairing, overriding the endpoint's
+/// normal (strict) server config with a permissive one for this
+/// connection only — see [`connect_for_pairing`] and ADR-0004.
+pub async fn accept_for_pairing(
+    incoming: quinn::Incoming,
+    our_device_id: DeviceId,
+    identity: &IdentityCert,
+) -> Result<Peer, NetError> {
+    let permissive: TrustCheck = Arc::new(|_device_id| true);
+    let server_cfg = config::server_config(
+        identity,
+        permissive,
+        config::DEFAULT_MAX_IDLE_TIMEOUT,
+        config::DEFAULT_KEEP_ALIVE_INTERVAL,
+    )?;
+    let connecting = incoming
+        .accept_with(Arc::new(server_cfg))
+        .map_err(|e| NetError::Transport(e.to_string()))?;
+    let connection = connecting
+        .await
+        .map_err(|e| NetError::Transport(e.to_string()))?;
+
     finish_handshake(connection, our_device_id, false).await
 }
 

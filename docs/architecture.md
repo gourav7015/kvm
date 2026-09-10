@@ -81,27 +81,42 @@ channels. Platform-specific code is confined to backend modules inside
   existing Ed25519 keypair, verified by a custom rustls verifier that
   pins the embedded public key against the trust store rather than any CA
   chain — see [ADR-0003](adr/0003-net-tls-and-stream-design.md).
-- Phase 2 (discovery + pairing) — **in progress.** The pairing side is
-  done: `protocol` gained a `Pairing` message concern, `identity` gained
-  `pairing_code` (a pure, human-comparable code derived from two device
-  IDs, no wire transmission), `net` gained `connect_for_pairing`/
-  `accept_for_pairing` (a deliberately permissive TLS mode used only for
-  first contact — see [ADR-0004](adr/0004-pairing-model.md)), and `core`
-  now has its first real content: a pure pairing state machine plus the
-  async glue driving it over a real `Peer`. An end-to-end loopback test
-  proves the full chain: two devices starting completely untrusted
-  converge on matching pairing codes, commit trust into real (file-backed)
-  `TrustStore`s on both sides, and an ordinary post-pairing connection
-  then succeeds with no further pairing step.
-  While building that end-to-end test, found and fixed a real security
-  gap: rustls issues TLS 1.3 session tickets by default, which let a
-  revoked device keep reconnecting via a resumed session that skipped
-  full certificate re-verification — see
-  [ADR-0005](adr/0005-disable-tls-session-resumption.md).
-  **Still not started:** the `discovery` crate itself (mDNS + UDP
-  broadcast fallback + manual IP) — nothing currently *finds* a peer to
-  pair with; the pairing machinery above has only been exercised against
-  addresses supplied directly in tests.
+- Phase 2 (discovery + pairing) — **code and automated tests done; real
+  multi-machine manual QA still open.** Pairing: `protocol` gained a
+  `Pairing` message concern, `identity` gained `pairing_code` (a pure,
+  human-comparable code derived from two device IDs, no wire
+  transmission), `net` gained `connect_for_pairing`/`accept_for_pairing`
+  (a deliberately permissive TLS mode used only for first contact — see
+  [ADR-0004](adr/0004-pairing-model.md)), and `core` now has its first
+  real content: a pure pairing state machine plus the async glue driving
+  it over a real `Peer`. An end-to-end loopback test proves the full
+  chain: two devices starting completely untrusted converge on matching
+  pairing codes, commit trust into real (file-backed) `TrustStore`s on
+  both sides, and an ordinary post-pairing connection then succeeds with
+  no further pairing step.
+  Discovery: the `discovery` crate now exists — mDNS advertise/browse
+  (`mdns-sd`), a UDP broadcast fallback with its own tiny wire format
+  (`announcement.rs`, extensively fuzz-style unit tested), and manual IP
+  entry (`DiscoveredDevice::manual`). A loopback integration test proves
+  mDNS advertise+browse genuinely round-trips through the real OS
+  multicast stack, not just that the code compiles.
+  Two real bugs were found and fixed while building this, both by actual
+  end-to-end verification rather than code review: (1) rustls issues TLS
+  1.3 session tickets by default, which let a revoked device keep
+  reconnecting via a resumed session that skipped full certificate
+  re-verification — [ADR-0005](adr/0005-disable-tls-session-resumption.md);
+  (2) the mDNS host name was built from the full 64-char hex device_id,
+  silently exceeding DNS's 63-byte label limit and breaking address
+  record resolution with no visible error — [ADR-0006](adr/0006-mdns-hostname-dns-label-limit.md).
+  **What's still open:** the DoD's "mDNS-only, UDP-fallback-only, and
+  manual-IP-only paths each manually verified" calls for real separate
+  machines on a real LAN (real routers/Wi-Fi/multicast behavior that
+  loopback cannot exercise) — this environment has one machine. A
+  ready-to-run manual tool exists at `crates/discovery/examples/discover.rs`
+  and has been smoke-tested over loopback (mDNS path confirmed working
+  end-to-end; UDP broadcast's core send/recv/encode/decode is covered by
+  dedicated automated tests, since two example processes on one machine
+  can't share the broadcast port the way two real machines would).
 
 ### Open manual QA (not blocking further phases, but tracked)
 
@@ -111,6 +126,9 @@ channels. Platform-specific code is confined to backend modules inside
 | Windows Credential Manager round-trip | ✅ verified 2026-09-10 (user-run, real ignored integration test) |
 | Linux Secret Service round-trip | ⏳ pending — needs a Linux environment with a Secret Service daemon |
 | Real cross-machine LAN test (`kvm-net`, `examples/lan_peer.rs`) | ✅ verified 2026-09-10 — Windows listener ↔ macOS connector |
+| mDNS discovery across real separate machines (`kvm-discovery`, `examples/discover.rs`) | ⏳ pending — needs a second machine on the same LAN |
+| UDP broadcast discovery across real separate machines | ⏳ pending — needs a second machine on the same LAN |
+| Manual IP entry path | ⏳ pending — trivial in isolation, but worth confirming alongside the above two on real hardware |
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
 phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

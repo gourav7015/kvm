@@ -60,7 +60,8 @@ listener's log, matching real physical key presses on the Mac.
 |---|---|
 | Letters (A–Z sampled: X, C, H) | PASS |
 | Digits 0–9 | PASS — all ten captured in order, both edges |
-| Enter, Tab, Backspace, Escape, Space | PASS |
+| Enter, Backspace, Escape, Space | PASS |
+| Tab | PASS — flagged ambiguous mid-session (unclear during a busy, log-flooded multi-category test, same readability issue the F-key retest below ran into), then confirmed cleanly with a dedicated isolated retest (Tab alone, nothing else) |
 | Arrow keys (Up/Down/Left/Right) | PASS |
 | Function keys F1–F5 | PASS — isolated retest confirmed `Key::F1`..`Key::F5` exactly; one stray `Unknown(176)` between F4/F5 was an incidental extra keypress, not a mapping error |
 | Delete (forward-delete) | NOT TESTED — this MacBook's keyboard has one physical key (Backspace); forward-delete needs Fn+Delete, not tried |

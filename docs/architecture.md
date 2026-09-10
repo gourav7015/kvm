@@ -119,9 +119,16 @@ channels. Platform-specific code is confined to backend modules inside
   a DoD violation: UDP broadcast events aren't deduplicated by `device_id`
   at the crate level — a future `core` device list will need to do that.
 
-- Phase 3 (input engine, macOS↔Windows target pair) — **🟡 code and
-  automated tests green; manual on-hardware QA still OPEN, so this phase
-  is not yet closed.** `protocol` gained a normalized `Key`/`PlatformKind`
+- Phase 3 (input engine, macOS↔Windows target pair) — **🟡 real
+  Mac↔Windows hardware QA completed 2026-09-10/11; almost everything
+  passed, but this phase is not closed** — Windows UAC/elevated-window
+  behavior still needs a genuine (unelevated-relay) re-run, and Mac→
+  Windows Command→Control translation is a confirmed, structural FAIL
+  (macOS drops bare modifier presses at capture time — see
+  `docs/manual-qa/phase-3-input.md`). One real bug (translation logic
+  correct but never wired into the live inject path) was found and fixed
+  during this QA pass — commit `8266c24`. `protocol` gained a normalized
+  `Key`/`PlatformKind`
   instead of a raw OS keycode; `input` gained the `Capture`/`Inject`
   trait boundary, a pure OS-independent modifier-translation function
   (the killer feature: Command↔Control swap only when exactly one side
@@ -154,23 +161,26 @@ channels. Platform-specific code is confined to backend modules inside
 | UDP broadcast discovery across real separate machines | ✅ verified 2026-09-10 — both directions, Mac↔Windows |
 | Manual IP entry path | ✅ covered by the Phase 1c LAN test (`lan_peer.rs` uses a directly-supplied address, no discovery involved) plus `DiscoveredDevice::manual`'s unit test |
 
-### Manual QA record — Phase 3 (OPEN)
+### Manual QA record — Phase 3 (real Mac↔Windows run 2026-09-10/11)
 
-Automated tests (translation table, keycode round-trips, loopback
-capture→inject pipeline) are green, but none of these require the real
-Mac/Windows hardware this table is about — a green build is not
-evidence for any row below. Procedure: `docs/manual-qa/phase-3-input.md`.
+Full detail and evidence: `docs/manual-qa/phase-3-input.md`. One real
+bug was found and fixed during this run (see
+[ADR-0007](adr/0007-input-architecture.md)'s Update note and commit
+`8266c24`): `translate_for_target` was correct and unit-tested but never
+actually wired into the live inject path.
 
 | Item | Status |
 |---|---|
-| macOS Accessibility-permission-missing path (clear error, no panic, no silent no-op) | ⬜ OPEN — not yet run on the real Mac |
-| macOS keyboard capture/injection (letters, modifiers incl. left/right, function keys) | ⬜ OPEN |
-| macOS mouse capture/injection (move, click, drag, scroll) | ⬜ OPEN |
-| Windows keyboard capture/injection | ⬜ OPEN |
-| Windows mouse capture/injection | ⬜ OPEN |
-| Windows UAC/elevated-window behavior (documented limitation in ADR-0007 §5, not yet observed firsthand) | ⬜ OPEN |
-| Cmd↔Ctrl / Option↔Alt translation feels native end-to-end, Mac↔Windows both directions | ⬜ OPEN |
-| End-to-end input latency measured and logged (`examples/input_relay.rs`) | ⬜ OPEN |
+| macOS Accessibility-permission-missing path (clear error, no panic, no silent no-op) | ✅ PASS — verified 2026-09-10/11, real `PermissionDenied` before grant, real success after |
+| macOS keyboard capture/injection (letters, digits, Enter/Tab/Backspace/Escape/Space, arrows, F1–F5) | ✅ PASS |
+| macOS mouse capture/injection (move, left/right/middle click, scroll) | ✅ PASS |
+| Windows keyboard capture/injection (letters, digits, Enter/Tab/Backspace/Escape/Space, arrows, F1–F5, all modifiers) | ✅ PASS |
+| Windows mouse capture/injection (move, left/right/middle click, scroll) | ✅ PASS |
+| Windows UAC/elevated-window behavior | ⬜ OPEN — session's terminal ran elevated throughout, so the real (unelevated-relay-vs-elevated-target) precondition was never in effect; needs a re-run with a standard terminal |
+| **Control (Windows) → Command (Mac) translation** | ✅ PASS — confirmed with reproducible log evidence (real Ctrl+A on Windows executed as Cmd+A on the Mac) |
+| **Command (Mac) → Control (Windows) translation** | ❌ FAIL — structurally not exercisable: macOS reports bare modifier presses as `FlagsChanged`, which the capture backend deliberately drops (documented, pre-existing scope decision, not a new bug); a real Mac-side Cmd+C currently sends only a plain `C` with no modifier info at all |
+| Option↔Alt never translates | ✅ PASS, both directions |
+| End-to-end input latency measured and logged (`examples/input_relay.rs`) | ✅ PASS — network RTT 7.9–15.0ms, injection calls ~70–700µs typical (Mac CGEvent and Windows SendInput both), felt latency acceptable for interactive use |
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
 phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

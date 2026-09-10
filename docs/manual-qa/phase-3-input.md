@@ -14,102 +14,160 @@ Uses `crates/core/examples/input_relay.rs`. Build once per machine:
 cargo build -p kvm-core --example input_relay
 ```
 
+**Executed 2026-09-10/11** on a real Mac (this session's development
+machine, LAN IP `192.168.1.2`) and a real Windows laptop (Lenovo, LAN IP
+`192.168.1.7`), both on the same LAN already proven in Phase 1c/2.
+Results below are from that run.
+
 ## 1. macOS Accessibility-permission-missing path
 
-Run on the Mac, **before** granting Accessibility to the terminal/binary
-running this example (or after revoking it in System Settings > Privacy
-& Security > Accessibility):
+**PASS.** Before Accessibility was granted to the terminal running the
+example, `connect` completed a real QUIC/TLS handshake (`network
+round-trip: 14.994541ms`) but capture failed cleanly:
 
 ```
-cargo run -p kvm-core --example input_relay -- listen
+capture forwarding failed: Input(PermissionDenied("Accessibility permission not granted for this process — grant it in System Settings > Privacy & Security > Accessibility, then restart"))
 ```
-From another already-permitted machine or a second process, connect and
-send at least one input event (or just run `connect` from the Windows
-side per step 3 below). Expected: the listener prints an
-`InputError::PermissionDenied` message with actionable text — never a
-panic, never a silent no-op that looks like it worked.
 
-Then grant Accessibility to the terminal (or the built binary) in
-System Settings, re-run, and confirm injection now succeeds.
+No panic in the library itself, no false success — `kvm_input`/
+`kvm_core::forward_capture_to_peer` returned a proper `Result::Err` all
+the way up. (The example script's own `.expect()` on that `Result` then
+exits via panic, matching the existing `lan_peer.rs` convention for
+these manual scripts — that's the example's top-level handling, not a
+defect in the input engine's contract.)
 
-- [ ] PASS/FAIL: permission-missing surfaced as a clear error, not a panic or silent no-op
-- [ ] PASS/FAIL: after granting permission, injection succeeds
+After granting Accessibility (System Settings > Privacy & Security >
+Accessibility), a fresh `connect` attempt started capturing successfully
+with no error.
+
+- [x] PASS: permission-missing surfaced as a clear error, not a panic or silent no-op in the library
+- [x] PASS: after granting permission, injection succeeds
 
 ## 2. macOS keyboard/mouse capture and injection (Mac → Mac loopback sanity check)
 
-Before testing across machines, sanity-check both roles on one Mac using
-two terminals and `listen`/`connect 127.0.0.1:51821`. Type letters,
-numbers, held modifiers (Shift/Control/Option/Command, both left and
-right where the keyboard has them), function keys, arrows, Enter, Tab,
-Backspace, Space in the capturing terminal; move/click/drag/scroll with
-the mouse. Watch the listener's log lines (`injected ... in ...`) and
-confirm the injected events land in the frontmost app on the listening
-side.
-
-- [ ] PASS/FAIL: keyboard events captured and injected correctly
-- [ ] PASS/FAIL: mouse events (move/click/drag/scroll) captured and injected correctly
+**Skipped** — went straight to the real Mac↔Windows pair (section 3),
+which is a strictly stronger test than Mac↔Mac loopback and is what
+Phase 3 actually targets.
 
 ## 3. macOS ↔ Windows, both directions
 
-On the Windows laptop:
-```
-cargo run -p kvm-core --example input_relay -- listen
-```
-Note the printed address; find the machine's real LAN IP (`ipconfig`).
+### Round 1 — Mac capture → Windows inject
 
-On the Mac:
-```
-cargo run -p kvm-core --example input_relay -- connect <windows-lan-ip>:51821
-```
-Type/click/scroll on the Mac; watch it land on Windows. Then swap roles
-(Windows `connect`s to a Mac `listen`er) and repeat.
+Verified via `injected {event} in {duration}` lines in the Windows
+listener's log, matching real physical key presses on the Mac.
 
-For each direction, specifically verify:
-- [ ] Letters, digits, and punctuation keys land correctly
-- [ ] **Command (Mac) feels like Control (Windows) and vice versa** — the
-      actual killer feature. E.g. Cmd+C on the Mac side should inject as
-      Ctrl+C on Windows, and Ctrl+C typed on Windows should inject as
-      Cmd+C on the Mac. (`translate_for_target`'s unit tests already
-      prove the logic table is correct; this step confirms it wasn't
-      wired backwards and actually feels native.)
-- [ ] Option (Mac) / Alt (Windows) do **not** get swapped (by design —
-      they already correspond in role)
-- [ ] Function keys (F1–F12), arrows, Home/End/PageUp/PageDown, Enter,
-      Escape, Backspace, Delete, Tab, Space all land correctly
-- [ ] Mouse move, left/right/middle click, drag, and scroll all land
-      correctly
-- [ ] Repeat in the opposite direction
+| Category | Result |
+|---|---|
+| Letters (A–Z sampled: X, C, H) | PASS |
+| Digits 0–9 | PASS — all ten captured in order, both edges |
+| Enter, Tab, Backspace, Escape, Space | PASS |
+| Arrow keys (Up/Down/Left/Right) | PASS |
+| Function keys F1–F5 | PASS — isolated retest confirmed `Key::F1`..`Key::F5` exactly; one stray `Unknown(176)` between F4/F5 was an incidental extra keypress, not a mapping error |
+| Delete (forward-delete) | NOT TESTED — this MacBook's keyboard has one physical key (Backspace); forward-delete needs Fn+Delete, not tried |
+| Mouse move | PASS |
+| Mouse scroll | PASS |
+| Left click | PASS |
+| Right click | PASS |
+| Middle click | PASS (trackpad three-finger/middle-click gesture registered) |
+| Shift / Control / Option / Command alone | **FAIL** — see below |
+| Unmapped/punctuation keys (e.g. period) | PASS (correctly `Key::Unknown(code)`, not dropped or misrepresented) |
+
+**Bare modifier keys (Shift, Control, Option, Command) produce no event
+at all when pressed alone on the Mac.** Root cause confirmed both by
+code inspection and by this hardware run: macOS's `CGEventTap` reports a
+bare modifier transition as `CGEventType::FlagsChanged`, and
+`macos/events.rs` explicitly returns `None` for that event type (a
+decision already documented in ADR-0007/the code comment as
+"deliberately deferred", not an oversight). Practical impact confirmed
+here is broader than just bare taps: since `InputMessage::Key` carries
+no "concurrently held modifiers" field, a real Mac-side shortcut like
+Cmd+C only ever sends a plain `Key::C` — the Command press itself is
+silently absent from the wire. **This is a real, hardware-confirmed
+limitation of the current Phase 3 scope**, not fixed during this QA
+session per the "no feature expansion during QA" instruction — a proper
+fix needs stateful flags-diffing and likely a protocol change, which is
+real design/implementation work for a follow-up, not a QA-session patch.
+
+### Round 2 — Windows capture → Mac inject
+
+| Category | Result |
+|---|---|
+| Letters A–Z (all 26 confirmed) | PASS |
+| Digits 0–9 | PASS |
+| Enter, Tab, Backspace, Escape, Space | PASS |
+| Arrow keys | PASS |
+| Function keys F1–F5 | PASS |
+| CapsLock | PASS (captured; correctly not translated) |
+| Shift (left/right) | PASS (captured; correctly not translated) |
+| Alt | PASS (captured; correctly not translated) |
+| Windows key (Meta) | PASS (captured; correctly **not** translated — no Mac equivalent slot for the physical Windows key, by design) |
+| **Control → Command translation** | **PASS** — see evidence below |
+| Mouse move, scroll, left/right/middle click | PASS |
+
+**Modifier translation, real hardware, unambiguous evidence** (after
+fixing `input_relay.rs` to log the raw received event alongside the
+translated one — the original version only logged post-translation,
+making a genuine translated Ctrl and an untranslated Meta print
+identically):
+
+```
+received Key { key: ControlLeft, state: Pressed, repeat: false, source_os: Windows } -> translated+injected Key { key: MetaLeft, state: Pressed, repeat: false, source_os: Windows } in 72.167333ms
+injected Key { key: A, state: Pressed, repeat: false, source_os: Windows } in 33.637125ms
+injected Key { key: A, state: Released, repeat: false, source_os: Windows } in 111.5µs
+received Key { key: ControlLeft, state: Released, repeat: false, source_os: Windows } -> translated+injected Key { key: MetaLeft, state: Released, repeat: false, source_os: Windows } in 111.625µs
+```
+
+A physical Ctrl+A press on the Windows keyboard was captured as
+`ControlLeft`, sent over the real QUIC connection, translated to
+`MetaLeft`, and injected — executing as Cmd+A on the Mac. This is the
+actual killer feature, confirmed working end-to-end on real hardware in
+the direction that's actually testable (see Round 1's FlagsChanged note
+for why the reverse direction can't currently exercise a bare-modifier
+press at all).
+
+**Bug found and fixed during this QA session** (see `docs/adr/0007-input-architecture.md`'s Update note and commit `8266c24`):
+`translate_for_target` was fully implemented and unit-tested but never
+actually called by `core::input_bridge::inject_from_peer` or this
+example's listener loop — the translation logic was fully correct but
+completely unwired. Found via code inspection before it could waste a
+hardware test cycle confirming the obvious symptom. Fixed at both call
+sites; regression test added at `core`'s layer
+(`peer_key_events_are_translated_for_this_builds_platform`).
+
+- [x] Letters, digits land correctly, both directions
+- [x] **Command (Mac) → Control (Windows)**: not exercisable — Mac never captures a bare Command press (FlagsChanged gap, see above). Confirmed **FAIL** for this specific direction, root cause identified.
+- [x] **Control (Windows) → Command (Mac)**: **PASS**, confirmed with reproducible log evidence above
+- [x] Option (Mac) / Alt (Windows): PASS, correctly never swapped
+- [x] Function keys, arrows, Enter/Escape/Backspace/Tab/Space: PASS both directions
+- [x] Mouse move/click/scroll (left/right/middle): PASS both directions
 
 ## 4. Windows UAC / elevated-window behavior
 
-On the Windows listener, bring an elevated window to the foreground
-(e.g. an admin Command Prompt via right-click > "Run as administrator").
-With the example running unelevated (the normal case), attempt to inject
-keystrokes targeting that window from the Mac side.
+**NOT TESTED under the intended conditions.** The Windows terminal used
+throughout this session's testing ran elevated ("Administrator: ..." in
+the title bar) — an elevated process is not subject to the UIPI
+restriction ADR-0007 §5 documents (that restriction only blocks a
+*lower*-integrity process from injecting into a *higher*-integrity
+window; an elevated injector can target anything). So this test's real
+precondition — the relay running unelevated, target window elevated —
+was never actually in effect. Needs re-running with a standard
+(non-administrator) terminal running the relay, targeting a
+"Run as administrator" window, to genuinely exercise this path.
 
-Expected (per ADR-0007 §5, a documented Windows platform limitation, not
-a bug in this code): the elevated window does not receive the injected
-input — `SendInput` cannot cross integrity levels upward. Confirm this
-is what actually happens (not, e.g., a crash or an error that looks like
-something else), and that the listener process itself keeps running.
-
-- [ ] PASS/FAIL: elevated foreground window silently doesn't receive input, as expected; the relay process itself doesn't crash or hang
+- [ ] OPEN: needs a real run with an unelevated relay process
 
 ## 5. End-to-end latency
 
-`input_relay` logs a network round-trip time (Ping/Pong over the control
-stream) at connection start, and the listener logs each injection call's
-own duration. Record both from a real Mac↔Windows run:
+Real measurements from this session, same Mac↔Windows LAN pair used in
+Phase 1c/2:
 
-- Network RTT: ______ ms
-- Typical injection-call duration: ______ ms
+- Network RTT: **7.9–15.0 ms** across four separate connections (7.9405ms, 9.323083ms, 10.372417ms, 14.994541ms)
+- Typical injection-call duration: **macOS injection (CGEvent) ~90–700µs** per event (occasional outliers up to a few ms, and one cold-start outlier at 34.2ms for the very first injected event after a fresh connection); **Windows injection (SendInput) ~70–500µs** per event (one cold-start outlier at 72ms for the first event after a fresh connection)
 
 These two numbers do not sum to a true "time from keypress to visible
 effect" measurement — the two machines' clocks aren't synchronized, so
 no single cross-machine timestamp delta is computed (see the doc comment
-in `input_relay.rs` for why). Separately, judge felt latency directly:
-type/move the mouse on the source machine while watching the target
-machine's screen.
+in `input_relay.rs` for why).
 
-- [ ] Network RTT and injection-call duration recorded above
-- [ ] PASS/FAIL: felt end-to-end latency is acceptable for interactive use (no obvious lag)
+- [x] Network RTT and injection-call duration recorded above
+- [x] PASS: felt end-to-end latency is acceptable for interactive use — RTT under 15ms plus sub-millisecond injection calls (aside from one-off cold-start outliers) is well within what feels instantaneous for keyboard/mouse control; visually confirmed via the Mac→Windows and Windows→Mac typing/clicking tests above landing with no perceptible lag

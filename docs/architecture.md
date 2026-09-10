@@ -62,43 +62,34 @@ channels. Platform-specific code is confined to backend modules inside
   Serialization uses `postcard`, not the originally planned `bincode` — see
   [ADR-0002](adr/0002-postcard-not-bincode.md).
 - Phase 1b (`identity` crate: keypairs, keychain storage, trust store) —
-  code and automated tests green, but the phase's own DoD requires
-  keychain integration manually verified on all 3 OSes, and only macOS has
-  been done. **🟡 Phase 1b is OPEN.** Tracked below.
+  code and automated tests green. Keychain integration manually verified
+  on macOS (this session) and Windows (user-reported: real ignored
+  integration test run against Windows Credential Manager, 2026-09-10).
+  Linux Secret Service round-trip remains untested — no environment or
+  report has covered it. **🟡 Phase 1b carries one open item (Linux
+  keychain)**, explicitly not treated as blocking further phases per
+  2026-09-10 direction — tracked below so it isn't lost, not because it
+  stopped mattering.
 - Phase 1c (`net` crate: QUIC transport, TLS mutual auth, multiplexed
-  streams, heartbeat/reconnect) — code and automated tests green (loopback
-  multi-stream, simulated packet-loss/latency via a UDP relay, forced-kill
-  detection + backoff, untrusted-peer/revoked-device rejection, replayed-
-  handshake rejection). CI status on the latest push is being confirmed.
-  The phase's own DoD requires a real cross-machine LAN test, not just
-  loopback, and this environment has only one machine. **🟡 Phase 1c is
-  OPEN.** Tracked below. A ready-to-run manual test exists at
-  `crates/net/examples/lan_peer.rs` (usage documented in its own doc
-  comment) and has been smoke-tested over loopback, but not yet run
-  across two real machines.
+  streams, heartbeat/reconnect) — code and automated tests green, CI green
+  on all 3 OS runners. Real cross-machine LAN test completed 2026-09-10:
+  Windows listener ↔ macOS connector, successful QUIC/TLS handshake and
+  ping/pong exchange — genuinely cross-machine *and* cross-platform, the
+  strongest form of evidence this DoD item asked for. **🟢 Phase 1c is
+  CLOSED.**
   Identity uses self-signed X.509 certs (via `rcgen`) built from the
   existing Ed25519 keypair, verified by a custom rustls verifier that
   pins the embedded public key against the trust store rather than any CA
   chain — see [ADR-0003](adr/0003-net-tls-and-stream-design.md).
 
-### Open manual QA (blocking phase closure)
-
-Two independent gates — closing one does not close the other.
-
-**Phase 1b — `identity` keychain integration:**
+### Open manual QA (not blocking further phases, but tracked)
 
 | Item | Status |
 |---|---|
 | macOS Keychain round-trip (`kvm-identity`, `cargo test -- --ignored`) | ✅ verified 2026-09-09 |
-| Windows Credential Manager round-trip | ⏳ pending — needs a Windows environment |
+| Windows Credential Manager round-trip | ✅ verified 2026-09-10 (user-run, real ignored integration test) |
 | Linux Secret Service round-trip | ⏳ pending — needs a Linux environment with a Secret Service daemon |
-
-**Phase 1c — `net` real-network behavior:**
-
-| Item | Status |
-|---|---|
-| CI green on latest push (build/test/clippy/fmt/deny, all 3 OS runners) | ⏳ confirming |
-| Real cross-machine LAN test (`kvm-net`, `examples/lan_peer.rs`) | ⏳ pending — needs a second machine on the same LAN |
+| Real cross-machine LAN test (`kvm-net`, `examples/lan_peer.rs`) | ✅ verified 2026-09-10 — Windows listener ↔ macOS connector |
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
 phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

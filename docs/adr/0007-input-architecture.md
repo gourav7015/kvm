@@ -4,6 +4,26 @@
 
 Accepted (2026-09-10)
 
+**Update (2026-09-10, during Phase 3 manual QA):** decision 3 below
+describes translation happening "on the injecting side," but the first
+implementation only ever *defined* `translate_for_target` — nothing
+actually called it. `core::input_bridge::inject_from_peer` and
+`examples/input_relay.rs`'s listener loop both injected every `Key`
+event exactly as received. Found via code inspection while preparing
+the real-hardware modifier-translation test (caught before it wasted a
+hardware test cycle, not caught by unit tests, since the pure function
+itself was correct and fully covered — the gap was purely in wiring it
+into the live path). Fixed by calling `translate_for_target` in both
+call sites, using a small per-target `LOCAL_PLATFORM` constant
+(`cfg(target_os = "macos")` / `cfg(windows)` / `cfg(unix, not(macos))`);
+regression test added at `core`'s layer
+(`peer_key_events_are_translated_for_this_builds_platform` in
+`crates/core/tests/input_bridge_end_to_end.rs`), since that's the
+lowest layer that can actually exercise the live wiring end-to-end.
+`MacInject`/`WindowsInject` themselves were correctly left untouched —
+translation stays out of the per-OS shims, preserving decision 2's
+"provably thin, zero business logic" property.
+
 ## Context
 
 Phase 3 needed a platform-independent input representation plus per-OS

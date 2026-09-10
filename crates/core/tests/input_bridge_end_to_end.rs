@@ -232,3 +232,105 @@ async fn peer_input_messages_are_injected_in_order() {
     peer_a.connection.close(0u32.into(), b"test done");
     let _ = inject_task.await.unwrap();
 }
+
+/// Regression test for a real bug found during Phase 3 manual QA:
+/// `inject_from_peer` injected every `Key` event exactly as received,
+/// never calling `translate_for_target` — so modifier-role translation
+/// (the "killer feature" ADR-0007 §3 describes) was fully implemented
+/// and unit-tested in isolation, but never actually wired into the live
+/// capture->inject pipeline. Confirmed on real Mac<->Windows hardware
+/// before being traced to this exact gap and fixed. This test runs on
+/// whatever OS the suite runs on and asserts translation relative to
+/// *this build's* platform, so it stays meaningful across CI's three
+/// OS runners rather than hardcoding one direction.
+#[tokio::test]
+async fn peer_key_events_are_translated_for_this_builds_platform() {
+    let (a, b) = mutually_trusting_pair([84u8; 32], [85u8; 32]);
+
+    let connect_task = {
+        let addr = b.addr;
+        let our_id = a.device_id;
+        let endpoint = a.endpoint.clone();
+        tokio::spawn(async move { kvm_net::connect(&endpoint, addr, our_id).await })
+    };
+    let accept_task = {
+        let our_id = b.device_id;
+        let endpoint = b.endpoint.clone();
+        tokio::spawn(async move {
+            let incoming = endpoint.accept().await.expect("endpoint closed");
+            kvm_net::accept(incoming, our_id).await
+        })
+    };
+    let mut peer_a = connect_task.await.unwrap().unwrap();
+    let peer_b = accept_task.await.unwrap().unwrap();
+
+    // `translate_for_target` only swaps Control<->Meta, and only the
+    // *primary-shortcut-modifier* direction: Windows/Linux's Control
+    // becomes macOS's Command when the target is macOS; macOS's Command
+    // becomes Windows/Linux's Control otherwise. A raw Meta (Windows
+    // key) sent *to* macOS is deliberately left alone — there's no
+    // macOS equivalent slot for it — so the (source, sent key, expected
+    // key) triple has to match the real direction being exercised, not
+    // just "some non-local source".
+    #[cfg(target_os = "macos")]
+    let (source_os, sent_key, expected_key) =
+        (PlatformKind::Windows, Key::ControlLeft, Key::MetaLeft);
+    #[cfg(not(target_os = "macos"))]
+    let (source_os, sent_key, expected_key) =
+        (PlatformKind::MacOs, Key::MetaLeft, Key::ControlLeft);
+
+    let sent = InputMessage::Key {
+        key: sent_key,
+        state: ButtonState::Pressed,
+        repeat: false,
+        source_os,
+    };
+    let expected_translated = InputMessage::Key {
+        key: expected_key,
+        state: ButtonState::Pressed,
+        repeat: false,
+        source_os,
+    };
+
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let inject_task = {
+        let received = received.clone();
+        tokio::spawn(async move {
+            let mut peer_b = peer_b;
+            let mut inject = FakeInject {
+                received: received.clone(),
+            };
+            inject_from_peer(&mut inject, &mut peer_b.streams.input).await
+        })
+    };
+
+    peer_a
+        .streams
+        .input
+        .send(&Message::Input(sent.clone()))
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if !received.lock().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the event to be injected"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let got = received.lock().unwrap().clone();
+    assert_eq!(
+        got,
+        vec![expected_translated],
+        "{sent_key:?} from a {source_os:?} source must arrive translated to {expected_key:?} \
+         on this build's platform, not passed through as the raw {sent:?}"
+    );
+
+    peer_a.connection.close(0u32.into(), b"test done");
+    let _ = inject_task.await.unwrap();
+}

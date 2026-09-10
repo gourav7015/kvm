@@ -48,18 +48,45 @@ mod real {
 
     use kvm_core::forward_capture_to_peer;
     use kvm_identity::DeviceKeypair;
-    use kvm_input::Inject;
+    use kvm_input::{Inject, translate_for_target};
     use kvm_net::{IdentityCert, TrustCheck};
-    use kvm_protocol::{ControlMessage, Message};
+    use kvm_protocol::{ControlMessage, InputMessage, Message, PlatformKind};
 
     #[cfg(target_os = "macos")]
     use kvm_input::{MacCapture as LocalCapture, MacInject as LocalInject};
     #[cfg(windows)]
     use kvm_input::{WindowsCapture as LocalCapture, WindowsInject as LocalInject};
 
+    #[cfg(target_os = "macos")]
+    const LOCAL_PLATFORM: PlatformKind = PlatformKind::MacOs;
+    #[cfg(windows)]
+    const LOCAL_PLATFORM: PlatformKind = PlatformKind::Windows;
+
     const SEED_LISTENER: [u8; 32] = [0xCC; 32];
     const SEED_CONNECTOR: [u8; 32] = [0xDD; 32];
     const LISTEN_PORT: u16 = 51821;
+
+    /// Same modifier-role translation `core::input_bridge::inject_from_peer`
+    /// applies — duplicated here (not imported, it's private to `core`)
+    /// because this example's `run_listener` has its own receive loop for
+    /// per-event latency logging (see the module doc comment) instead of
+    /// calling `inject_from_peer` directly.
+    fn translate_for_local_platform(event: InputMessage) -> InputMessage {
+        match event {
+            InputMessage::Key {
+                key,
+                state,
+                repeat,
+                source_os,
+            } => InputMessage::Key {
+                key: translate_for_target(key, source_os, LOCAL_PLATFORM),
+                state,
+                repeat,
+                source_os,
+            },
+            other => other,
+        }
+    }
 
     pub async fn run() {
         let args: Vec<String> = env::args().collect();
@@ -148,6 +175,7 @@ mod real {
         loop {
             match peer.streams.input.recv().await {
                 Ok(Message::Input(event)) => {
+                    let event = translate_for_local_platform(event);
                     let started = Instant::now();
                     match inject.inject(&event) {
                         Ok(()) => println!("injected {event:?} in {:?}", started.elapsed()),

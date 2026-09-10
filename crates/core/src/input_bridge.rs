@@ -12,11 +12,44 @@
 
 use std::sync::mpsc as std_mpsc;
 
-use kvm_input::{Capture, Inject};
+use kvm_input::{Capture, Inject, translate_for_target};
 use kvm_net::{MessageStream, NetError};
-use kvm_protocol::Message;
+use kvm_protocol::{InputMessage, Message, PlatformKind};
 
 use crate::error::CoreError;
+
+/// This build's own platform, for modifier-role translation on the
+/// injecting side (ADR-0007 §3). No Linux `Inject` backend exists yet
+/// (ADR-0007 §6), but the constant is still defined for every `cfg(unix)`
+/// non-macOS target so this module stays platform-complete rather than
+/// only covering the two backends that currently exist.
+#[cfg(target_os = "macos")]
+const LOCAL_PLATFORM: PlatformKind = PlatformKind::MacOs;
+#[cfg(windows)]
+const LOCAL_PLATFORM: PlatformKind = PlatformKind::Windows;
+#[cfg(all(unix, not(target_os = "macos")))]
+const LOCAL_PLATFORM: PlatformKind = PlatformKind::Linux;
+
+/// Applies modifier-role translation (Cmd<->Ctrl when exactly one side is
+/// macOS, everything else unchanged) to a `Key` event before it's
+/// injected locally. Non-`Key` events pass through untouched — mouse
+/// events carry no platform-specific modifier role to translate.
+fn translate_for_local_platform(event: InputMessage) -> InputMessage {
+    match event {
+        InputMessage::Key {
+            key,
+            state,
+            repeat,
+            source_os,
+        } => InputMessage::Key {
+            key: translate_for_target(key, source_os, LOCAL_PLATFORM),
+            state,
+            repeat,
+            source_os,
+        },
+        other => other,
+    }
+}
 
 /// Runs `capture` and forwards every event it produces onto `stream`
 /// until the stream closes or errors. Stops capture before returning,
@@ -68,7 +101,7 @@ pub async fn inject_from_peer(
 ) -> Result<(), CoreError> {
     loop {
         match stream.recv().await {
-            Ok(Message::Input(event)) => inject.inject(&event)?,
+            Ok(Message::Input(event)) => inject.inject(&translate_for_local_platform(event))?,
             Ok(other) => {
                 return Err(CoreError::Net(NetError::ProtocolViolation(format!(
                     "expected an Input message on the input stream, got {other:?}"

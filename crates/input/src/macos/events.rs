@@ -117,6 +117,38 @@ pub fn to_input_message(
                 return None;
             }
             let (dx, dy) = point_delta(previous, location);
+            // DIAGNOSTIC (Phase 4 pointer-range root-cause hunt): the
+            // first stage of the "follow one physical movement through
+            // the whole pipeline" trace. Logs both independent readings
+            // of how far the pointer just moved, side by side:
+            //
+            //   `location`/`dx`/`dy` -- the absolute-position-derived
+            //   delta this backend actually ships (see `point_delta`).
+            //
+            //   `hid_dx`/`hid_dy` -- `kCGMouseEventDeltaX/Y`, the
+            //   event's own relative motion fields, which come from the
+            //   HID layer and are not a function of any screen position.
+            //
+            // These two agreeing means the Mac is reporting movement
+            // faithfully and any loss is downstream. `dx`/`dy` going to
+            // zero while `hid_dx`/`hid_dy` keep reporting real motion
+            // means the movement is already gone by this line -- nothing
+            // further down the pipeline could then possibly recover it.
+            // Read alongside `crates/input/examples/mac_pointer_probe.rs`,
+            // which measures the same thing standalone.
+            let hid_dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X);
+            let hid_dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y);
+            tracing::debug!(
+                stage = "1-capture",
+                loc_x = location.x,
+                loc_y = location.y,
+                dx,
+                dy,
+                hid_dx,
+                hid_dy,
+                point_delta_lost_real_motion = (dx == 0 && dy == 0) && (hid_dx != 0 || hid_dy != 0),
+                "macOS capture: CGEvent location and the delta derived from it"
+            );
             Some(InputMessage::MouseMove { dx, dy })
         }
         CGEventType::LeftMouseDown => Some(InputMessage::MouseButton {

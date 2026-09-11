@@ -260,7 +260,17 @@ impl Router {
 
         let active_screen_owner = self.active_screen_owner();
         let active_screen_size = self.screen_sizes.get(&active_screen_owner).copied();
-        tracing::trace!(
+        // DIAGNOSTIC (Phase 4 pointer-range root-cause hunt): stage 2 of
+        // the "follow one physical movement through the whole pipeline"
+        // trace -- the normalized delta as it arrives here, and the
+        // virtual position it accumulates into. Compare `dx`/`dy` against
+        // stage 1 (`macos::events`) to see whether anything between
+        // capture and routing changed them, and `position` against the
+        // Windows side's `before`/`intended`/`actual` to see whether the
+        // target applied what it was told. `debug` rather than `trace` so
+        // one RUST_LOG level shows every stage of the chain at once.
+        tracing::debug!(
+            stage = "2-router",
             dx,
             dy,
             position = ?self.position,

@@ -235,7 +235,18 @@ impl Session {
                 return Ok(());
             }
             Effect::Send { to, message } => {
-                tracing::trace!(?to, ?message, "sending input to active target");
+                // DIAGNOSTIC (Phase 4 pointer-range root-cause hunt):
+                // stage 3 -- exactly what goes onto the wire, immediately
+                // before serialization/QUIC. The target side logs what it
+                // receives and what it does with it (see
+                // `WindowsInject::inject`), so stage 3 vs. the target's
+                // own `dx`/`dy` isolates the transport.
+                tracing::debug!(
+                    stage = "3-session-send",
+                    ?to,
+                    ?message,
+                    "sending input to active target"
+                );
                 (to, Message::Input(message))
             }
             Effect::Switch {

@@ -152,6 +152,7 @@ impl Inject for WindowsInject {
                 // SAFETY: same contract as the read above.
                 let readback_ok = unsafe { GetCursorPos(&mut after) }.is_ok();
                 tracing::info!(
+                    stage = "4-windows-inject",
                     before = ?(point.x, point.y),
                     dx, dy,
                     intended = ?(target_x, target_y),

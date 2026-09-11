@@ -42,7 +42,7 @@ pub enum PlatformKind {
 /// This list is deliberately not exhaustive. An unrecognized platform key
 /// becomes [`Key::Unknown`] carrying the raw platform code, rather than
 /// being dropped or misrepresented as some other key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Key {
     A,
     B,

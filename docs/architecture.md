@@ -43,7 +43,10 @@ channels. Platform-specific code is confined to backend modules inside
 - **`input`** — Cross-platform keyboard/mouse capture and injection. A
   platform-agnostic `Capture`/`Inject` trait plus pure, OS-independent
   modifier-translation and switching logic; per-OS backends stay thin shims
-  behind the trait.
+  behind the trait. macOS, Windows, and Linux/X11 backends exist; no
+  Wayland backend (see [ADR-0008](adr/0008-linux-input-architecture.md) —
+  a formal NO-GO for general-purpose capture under Wayland's current
+  security model, not a silently-dropped gap).
 - **`clipboard`** — Cross-device clipboard read/write/watch, with per-OS
   change detection.
 - **`transfer`** — File transfer: chunking, progress reporting, transfer
@@ -157,6 +160,34 @@ channels. Platform-specific code is confined to backend modules inside
   rationale, including why Linux capture is deferred to Phase 3b (a
   dedicated X11-vs-Wayland go/no-go decision, not silently skipped).
   Manual QA procedure: `docs/manual-qa/phase-3-input.md`.
+
+- Phase 3b (Linux input spike, X11 GO / Wayland NO-GO) — **🟡 OPEN.**
+  `input` gained an `x11` backend (`crates/input/src/x11`): XInput2 raw
+  events for capture, the XTEST extension's `FakeInput` for injection,
+  via `x11rb` (isolated to `cfg(target_os = "linux")`, `xinput`+`xtest`
+  features only). A dynamic keycode↔keysym table
+  (`x11::keymap`, queried per-session via `GetKeyboardMapping`) bridges
+  X11's non-portable keycodes to the portable keysym layer
+  (`x11::keysym`, unit-tested exactly like the macOS/Windows keycode
+  tables). Wayland: no code — a formal, evidenced NO-GO for
+  general-purpose global *capture* under Wayland's current security
+  model (the `org.freedesktop.portal.InputCapture` mechanism that would
+  enable it isn't supported by KWin even in KDE 6, and Mutter's support
+  is limited; injection alone has better portal support via
+  `RemoteDesktop`+`libei` but requires a per-session consent dialog,
+  incompatible with a silent background service, and wasn't pursued for
+  being half of what a bidirectional KVM needs). Full rationale:
+  [ADR-0008](adr/0008-linux-input-architecture.md).
+  X11 code compiles and passes `clippy -D warnings` cross-checked from
+  macOS via `cargo check`/`clippy --target x86_64-unknown-linux-gnu`
+  (this development machine has no Linux display server to link/run
+  against directly — the same cross-verification-only limitation
+  `kvm-net`'s Windows/Linux checks already have, see Phase 1c/3).
+  **Not yet run against a real X server** — every manual QA row in
+  `docs/manual-qa/phase-3b-linux-input.md` is OPEN pending that.
+  `protocol::Key` gained `#[derive(Hash)]` (purely additive, needed for
+  `x11::keymap`'s reverse lookup) — the only change to any pre-existing
+  Phase 1–3 code this phase made.
 
 ### Manual QA record (all closed)
 

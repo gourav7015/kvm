@@ -17,3 +17,10 @@ windows = { version = "0.62.2", features = ["Win32_UI_Input_KeyboardAndMouse", "
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.25.0", features = ["highsierra"] }
 core-foundation = "0.10.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# X11 only (see ADR-0008) -- XInput2 raw events for capture, the XTEST
+# extension for injection. Default features only: the pure-Rust
+# RustConnection (x11rb::connect) needs none of the optional
+# libxcb-interop features that would pull in unsafe FFI or extra deps.
+x11rb = { version = "0.13.2", features = ["xinput", "xtest"] }

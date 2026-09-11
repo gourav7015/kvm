@@ -159,7 +159,7 @@ mod real {
         let peer_device_id = peer.remote_device_id;
         println!("accepted connection from {peer_device_id:?}");
 
-        let geometry = new_local_inject();
+        let mut geometry = new_local_inject();
         let our_screen_size = geometry.screen_size().expect("read local screen size");
         let initial_position = geometry
             .cursor_position()
@@ -203,7 +203,7 @@ mod real {
         let mut last_state = session.ownership_state();
         while let Ok(event) = source.recv() {
             let is_move = matches!(event, InputMessage::MouseMove { .. });
-            if let Err(e) = session.handle_captured(event).await {
+            if let Err(e) = session.handle_captured(event, &mut geometry).await {
                 eprintln!("session error: {e}");
             }
             let state = session.ownership_state();

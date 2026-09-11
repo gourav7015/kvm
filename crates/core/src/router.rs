@@ -67,6 +67,26 @@ pub enum Effect {
         to: DeviceId,
         cursor_position: (i32, i32),
     },
+    /// Warp *our own* local cursor to `(x, y)` — the caller applies
+    /// this via its local `PointerGeometry`, not a network send.
+    ///
+    /// Emitted the moment ownership leaves `Local` for the first time
+    /// (not on later onward hops between two remote targets). Found
+    /// via real Mac->Windows hardware QA (see ADR-0009's Update note):
+    /// every backend's `Capture` is listen-only, so the local OS cursor
+    /// keeps moving with real captured deltas even while `Forwarding`
+    /// — and since the edge crossing that triggered the switch, by
+    /// definition, just pinned that cursor against its own screen
+    /// boundary, it has nowhere left to go. Further pushes in that
+    /// direction report `dx`/`dy` of `0` (the OS won't move a cursor
+    /// past its own edge), starving the virtual position tracking of
+    /// real motion and, worse, letting ordinary hand jitter near the
+    /// pinned edge flicker back and forth across `EDGE_MARGIN` and
+    /// bounce ownership home unpredictably. Recentering the local
+    /// cursor away from every boundary the instant it stops being the
+    /// input source removes the pin entirely for the rest of the
+    /// `Forwarding` session.
+    RecenterLocal { x: i32, y: i32 },
 }
 
 /// Drives edge-switching from the capturing device's point of view.
@@ -311,6 +331,12 @@ impl Router {
                     to: target,
                     cursor_position: landing,
                 });
+                if old_state == OwnershipState::Local
+                    && let Some(&our_size) = self.screen_sizes.get(&self.our_device_id)
+                {
+                    let (cx, cy) = (our_size.0 as i32 / 2, our_size.1 as i32 / 2);
+                    effects.push(Effect::RecenterLocal { x: cx, y: cy });
+                }
             }
             OwnershipState::Local => {
                 self.state = OwnershipState::Local;
@@ -454,12 +480,18 @@ mod tests {
         // why landing exactly on the boundary is itself a real-hardware
         // bug (ADR-0009's Update note).
         let effects = router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
+        // Switching away from Local for the first time also recenters
+        // our own local cursor (see `Effect::RecenterLocal`'s doc
+        // comment / ADR-0009's Update note) -- (1000,800)/2 = (500,400).
         assert_eq!(
             effects,
-            vec![Effect::Switch {
-                to: NEIGHBOR,
-                cursor_position: (5, 400),
-            }]
+            vec![
+                Effect::Switch {
+                    to: NEIGHBOR,
+                    cursor_position: (5, 400),
+                },
+                Effect::RecenterLocal { x: 500, y: 400 },
+            ]
         );
         assert_eq!(
             router.state(),
@@ -552,10 +584,9 @@ mod tests {
 
         let effects = router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
         for effect in &effects {
-            let target = match effect {
-                Effect::Send { to, .. } | Effect::Switch { to, .. } => *to,
-            };
-            assert_ne!(target, UNTRUSTED);
+            if let Effect::Send { to, .. } | Effect::Switch { to, .. } = effect {
+                assert_ne!(*to, UNTRUSTED);
+            }
         }
         assert_ne!(
             router.state(),
@@ -640,10 +671,13 @@ mod tests {
         let effects = router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
         assert_eq!(
             effects,
-            vec![Effect::Switch {
-                to: NEIGHBOR,
-                cursor_position: (5, 400),
-            }]
+            vec![
+                Effect::Switch {
+                    to: NEIGHBOR,
+                    cursor_position: (5, 400),
+                },
+                Effect::RecenterLocal { x: 500, y: 400 },
+            ]
         );
     }
 
@@ -724,10 +758,13 @@ mod tests {
         // boundary by EDGE_MARGIN+1 -- see `nudge_off_boundary`).
         assert_eq!(
             effects,
-            vec![Effect::Switch {
-                to: NEIGHBOR,
-                cursor_position: (5, 1000),
-            }]
+            vec![
+                Effect::Switch {
+                    to: NEIGHBOR,
+                    cursor_position: (5, 1000),
+                },
+                Effect::RecenterLocal { x: 500, y: 400 },
+            ]
         );
     }
 
@@ -805,6 +842,43 @@ mod tests {
         assert_eq!(
             *cursor_position, reported,
             "the effect sent to the target and router.state()'s virtual_cursor must never disagree"
+        );
+    }
+
+    /// Regression test for a real Mac->Windows hardware QA finding (see
+    /// ADR-0009's Update note): the local cursor gets pinned against
+    /// its own boundary by the very edge crossing that triggers a
+    /// switch, starving further movement and causing hand-jitter-driven
+    /// flutter across `EDGE_MARGIN`. `RecenterLocal` fixes that -- but
+    /// only needs to fire once, the moment ownership actually leaves
+    /// `Local`, not on every subsequent onward hop between two already-
+    /// remote targets (our own local cursor isn't involved in those at
+    /// all, so recentering it again would be pointless).
+    #[test]
+    fn recenter_local_fires_only_on_the_first_switch_away_from_local() {
+        let layout = layout_with(&[(US, Edge::Right, NEIGHBOR), (NEIGHBOR, Edge::Right, THIRD)]);
+        let mut router = Router::new(US, PlatformKind::MacOs, layout, (1000, 800), (500, 400));
+        router.set_peer_connected(NEIGHBOR, (1000, 800));
+        router.set_peer_connected(THIRD, (1000, 800));
+
+        // Local -> Forwarding(NEIGHBOR): first time leaving Local.
+        let first = router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
+        assert!(
+            first
+                .iter()
+                .any(|e| matches!(e, Effect::RecenterLocal { .. })),
+            "expected a RecenterLocal effect on the first switch away from Local, got {first:?}"
+        );
+
+        // Forwarding(NEIGHBOR) -> Forwarding(THIRD): an onward hop, our
+        // own local cursor was never involved.
+        let onward = router.handle_captured(InputMessage::MouseMove { dx: 1100, dy: 0 });
+        assert!(
+            !onward
+                .iter()
+                .any(|e| matches!(e, Effect::RecenterLocal { .. })),
+            "an onward hop between two remote targets must not recenter \
+             our own local cursor again, got {onward:?}"
         );
     }
 }

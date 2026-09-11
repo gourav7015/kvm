@@ -105,6 +105,14 @@ struct FakeGeometry {
     position: Arc<Mutex<(i32, i32)>>,
 }
 
+impl FakeGeometry {
+    fn new(initial: (i32, i32)) -> Self {
+        Self {
+            position: Arc::new(Mutex::new(initial)),
+        }
+    }
+}
+
 impl PointerGeometry for FakeGeometry {
     fn cursor_position(&self) -> Result<(i32, i32), InputError> {
         Ok(*self.position.lock().unwrap())
@@ -155,6 +163,7 @@ async fn edge_crossing_switches_active_target_and_warps_the_targets_cursor() {
     let layout = two_device_layout(a.device_id, b.device_id);
     let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
     session.add_peer(b.device_id, peer_a, (1000, 800));
+    let mut local_geometry = FakeGeometry::new((500, 400));
 
     let target_position = Arc::new(Mutex::new((999, 999)));
     let mut target_geometry = FakeGeometry {
@@ -171,7 +180,10 @@ async fn edge_crossing_switches_active_target_and_warps_the_targets_cursor() {
 
     // Push far enough right to cross the configured edge.
     session
-        .handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 })
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -188,7 +200,10 @@ async fn edge_crossing_switches_active_target_and_warps_the_targets_cursor() {
     // A follow-up move should now be forwarded to B, proving the
     // control-then-input sequence lands correctly on the real wire.
     session
-        .handle_captured(InputMessage::MouseMove { dx: 10, dy: 5 })
+        .handle_captured(
+            InputMessage::MouseMove { dx: 10, dy: 5 },
+            &mut local_geometry,
+        )
         .await
         .unwrap();
 
@@ -242,6 +257,7 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
 
     let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
     session.add_peer(b.device_id, peer_a, (1000, 800));
+    let mut local_geometry = FakeGeometry::new((500, 400));
 
     let target_position = Arc::new(Mutex::new((999, 999)));
     let mut target_geometry = FakeGeometry {
@@ -263,7 +279,10 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
 
         // -> Forwarding(B): warps B's cursor to the entry position.
         session
-            .handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 })
+            .handle_captured(
+                InputMessage::MouseMove { dx: 600, dy: 0 },
+                &mut local_geometry,
+            )
             .await
             .unwrap();
         assert!(matches!(
@@ -279,7 +298,10 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
 
         // -> Local: crossing back through B's Left edge.
         session
-            .handle_captured(InputMessage::MouseMove { dx: -1100, dy: 0 })
+            .handle_captured(
+                InputMessage::MouseMove { dx: -1100, dy: 0 },
+                &mut local_geometry,
+            )
             .await
             .unwrap();
         assert_eq!(session.ownership_state(), OwnershipState::Local);
@@ -289,7 +311,10 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
         // from the exact boundary -- see ADR-0009's Update note), not
         // silently leave B's cursor at the perturbed (777, 777).
         session
-            .handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 })
+            .handle_captured(
+                InputMessage::MouseMove { dx: 600, dy: 0 },
+                &mut local_geometry,
+            )
             .await
             .unwrap();
 
@@ -307,7 +332,10 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
 
         // Cross back once more so the next round starts from Local.
         session
-            .handle_captured(InputMessage::MouseMove { dx: -1100, dy: 0 })
+            .handle_captured(
+                InputMessage::MouseMove { dx: -1100, dy: 0 },
+                &mut local_geometry,
+            )
             .await
             .unwrap();
         assert_eq!(session.ownership_state(), OwnershipState::Local);
@@ -329,9 +357,13 @@ async fn an_unregistered_device_can_never_become_a_target_even_if_the_layout_nam
     // become an input target" requirement.
     let layout = two_device_layout(a.device_id, untrusted_id);
     let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
+    let mut local_geometry = FakeGeometry::new((500, 400));
 
     session
-        .handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 })
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+        )
         .await
         .unwrap();
 
@@ -347,9 +379,13 @@ async fn disconnect_then_reconnect_recovers_ownership_without_restarting_the_ses
     let layout = two_device_layout(a.device_id, b.device_id);
     let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
     session.add_peer(b.device_id, peer_a, (1000, 800));
+    let mut local_geometry = FakeGeometry::new((500, 400));
 
     session
-        .handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 })
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+        )
         .await
         .unwrap();
     assert!(matches!(
@@ -371,7 +407,10 @@ async fn disconnect_then_reconnect_recovers_ownership_without_restarting_the_ses
     // Local input must keep working with no crash and no special
     // handling required from the caller.
     session
-        .handle_captured(InputMessage::MouseMove { dx: 1, dy: 1 })
+        .handle_captured(
+            InputMessage::MouseMove { dx: 1, dy: 1 },
+            &mut local_geometry,
+        )
         .await
         .unwrap();
 
@@ -380,7 +419,10 @@ async fn disconnect_then_reconnect_recovers_ownership_without_restarting_the_ses
     session.add_peer(b.device_id, peer_a_second, (1000, 800));
 
     session
-        .handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 })
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+        )
         .await
         .unwrap();
     assert!(
@@ -418,21 +460,31 @@ async fn switching_to_a_new_target_flushes_held_modifiers_on_the_old_one_as_ordi
     let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
     session.add_peer(b.device_id, peer_a_b, (1000, 800));
     session.add_peer(c.device_id, peer_a_c, (1000, 800));
+    let mut local_geometry = FakeGeometry::new((500, 400));
 
     // -> Forwarding(B); hold Shift on B.
     session
-        .handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 })
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+        )
         .await
         .unwrap();
     session
-        .handle_captured(key_event(Key::ShiftLeft, ButtonState::Pressed))
+        .handle_captured(
+            key_event(Key::ShiftLeft, ButtonState::Pressed),
+            &mut local_geometry,
+        )
         .await
         .unwrap();
 
     // Cross onward from B's screen to C -- must flush Shift's Released
     // onto B before (or as part of) the switch to C.
     session
-        .handle_captured(InputMessage::MouseMove { dx: 1100, dy: 0 })
+        .handle_captured(
+            InputMessage::MouseMove { dx: 1100, dy: 0 },
+            &mut local_geometry,
+        )
         .await
         .unwrap();
     assert!(matches!(
@@ -511,13 +563,17 @@ async fn only_the_active_target_receives_input_never_an_inactive_connected_peer(
     let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
     session.add_peer(b.device_id, peer_a_b, (1000, 800));
     session.add_peer(c.device_id, peer_a_c, (1000, 800));
+    let mut local_geometry = FakeGeometry::new((500, 400));
 
     session
-        .handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 })
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+        )
         .await
         .unwrap();
     session
-        .handle_captured(key_event(Key::A, ButtonState::Pressed))
+        .handle_captured(key_event(Key::A, ButtonState::Pressed), &mut local_geometry)
         .await
         .unwrap();
 
@@ -548,4 +604,45 @@ async fn only_the_active_target_receives_input_never_an_inactive_connected_peer(
         leaked.is_err(),
         "C is connected but not the active target -- it must receive nothing"
     );
+}
+
+#[tokio::test]
+async fn recentering_the_local_cursor_is_actually_applied_via_pointer_geometry() {
+    // Regression test for a real Mac->Windows hardware QA finding (see
+    // ADR-0009's Update note): Effect::RecenterLocal must actually
+    // reach a real PointerGeometry::set_cursor_position call, not just
+    // exist as a value nobody applies.
+    let a = Device::new([22u8; 32]);
+    let b = Device::new([23u8; 32]);
+    let (peer_a, mut peer_b) = connect_pair(&a, &b).await;
+
+    let layout = two_device_layout(a.device_id, b.device_id);
+    let mut session = Session::new(a.device_id, layout, (1000, 800), (990, 400));
+    session.add_peer(b.device_id, peer_a, (1000, 800));
+    // Start pinned near our own right edge -- exactly the scenario
+    // that triggered the real bug.
+    let mut local_geometry = FakeGeometry::new((990, 400));
+
+    let target_task = tokio::spawn(async move {
+        let mut geometry = FakeGeometry::new((0, 0));
+        let mut inject = FakeInject {
+            received: Arc::new(Mutex::new(Vec::new())),
+        };
+        run_target(&mut peer_b, &mut geometry, &mut inject).await
+    });
+
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+        )
+        .await
+        .unwrap();
+
+    // Our own local cursor must now be away from the edge (the middle
+    // of our 1000x800 screen), not still pinned at (990, 400).
+    assert_eq!(local_geometry.cursor_position().unwrap(), (500, 400));
+
+    drop(session);
+    let _ = target_task.await;
 }

@@ -122,15 +122,37 @@ impl Session {
     /// as that peer disconnecting — handled the same way `remove_peer`
     /// handles it, not surfaced as a fatal session error, matching the
     /// DoD's "a disconnected target must not crash the session."
-    pub async fn handle_captured(&mut self, event: InputMessage) -> Result<(), CoreError> {
+    ///
+    /// `local_geometry` is used only for `Effect::RecenterLocal` — the
+    /// moment ownership first leaves `Local`, our own cursor gets
+    /// warped away from whatever boundary the triggering edge crossing
+    /// just pinned it against (see ADR-0009's Update note: without
+    /// this, the local OS cursor stays pinned there for the rest of the
+    /// `Forwarding` session, starving further real motion and letting
+    /// ordinary hand jitter near the pin flicker ownership back and
+    /// forth across `EDGE_MARGIN`).
+    pub async fn handle_captured(
+        &mut self,
+        event: InputMessage,
+        local_geometry: &mut dyn PointerGeometry,
+    ) -> Result<(), CoreError> {
         for effect in self.router.handle_captured(event) {
-            self.apply(effect).await?;
+            self.apply(effect, local_geometry).await?;
         }
         Ok(())
     }
 
-    async fn apply(&mut self, effect: Effect) -> Result<(), CoreError> {
+    async fn apply(
+        &mut self,
+        effect: Effect,
+        local_geometry: &mut dyn PointerGeometry,
+    ) -> Result<(), CoreError> {
         let (to, message) = match effect {
+            Effect::RecenterLocal { x, y } => {
+                tracing::info!(x, y, "recentering local cursor away from its own edge");
+                local_geometry.set_cursor_position(x, y)?;
+                return Ok(());
+            }
             Effect::Send { to, message } => (to, Message::Input(message)),
             Effect::Switch {
                 to,

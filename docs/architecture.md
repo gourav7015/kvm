@@ -161,30 +161,46 @@ channels. Platform-specific code is confined to backend modules inside
   dedicated X11-vs-Wayland go/no-go decision, not silently skipped).
   Manual QA procedure: `docs/manual-qa/phase-3-input.md`.
 
-- Phase 3b (Linux input spike, X11 GO / Wayland NO-GO) — **🟡 OPEN.**
-  `input` gained an `x11` backend (`crates/input/src/x11`): XInput2 raw
-  events for capture, the XTEST extension's `FakeInput` for injection,
-  via `x11rb` (isolated to `cfg(target_os = "linux")`, `xinput`+`xtest`
-  features only). A dynamic keycode↔keysym table
-  (`x11::keymap`, queried per-session via `GetKeyboardMapping`) bridges
-  X11's non-portable keycodes to the portable keysym layer
-  (`x11::keysym`, unit-tested exactly like the macOS/Windows keycode
-  tables). Wayland: no code — a formal, evidenced NO-GO for
-  general-purpose global *capture* under Wayland's current security
-  model (the `org.freedesktop.portal.InputCapture` mechanism that would
-  enable it isn't supported by KWin even in KDE 6, and Mutter's support
-  is limited; injection alone has better portal support via
-  `RemoteDesktop`+`libei` but requires a per-session consent dialog,
-  incompatible with a silent background service, and wasn't pursued for
-  being half of what a bidirectional KVM needs). Full rationale:
-  [ADR-0008](adr/0008-linux-input-architecture.md).
-  X11 code compiles and passes `clippy -D warnings` cross-checked from
-  macOS via `cargo check`/`clippy --target x86_64-unknown-linux-gnu`
-  (this development machine has no Linux display server to link/run
-  against directly — the same cross-verification-only limitation
-  `kvm-net`'s Windows/Linux checks already have, see Phase 1c/3).
-  **Not yet run against a real X server** — every manual QA row in
-  `docs/manual-qa/phase-3b-linux-input.md` is OPEN pending that.
+- Phase 3b (Linux input spike, X11 GO / Wayland NO-GO) — **🟢 CLOSED.**
+  Real Ubuntu 24.04.4 LTS/GNOME/X11 hardware QA completed 2026-09-11
+  (`docs/manual-qa/phase-3b-linux-input.md`), paired against the same
+  Mac used throughout Phase 3: both directions confirmed PASS —
+  keyboard (letters, digits, Enter/Tab/Backspace/Delete/Escape/Space,
+  arrows, F1–F5), mouse (move, left/right/middle click, scroll),
+  modifier translation both directions (Control↔Command, live evidence
+  both ways, including a real Shift+A producing a real capital letter
+  and a real injected Control+C genuinely interrupting a running
+  process on the target machine), local-input preservation (the Linux
+  machine's own keyboard/mouse kept working normally throughout — no
+  exclusive grab), and a stuck-modifier/disconnect scenario (held Shift
+  through an abrupt kill mid-connection — did not get stuck). `input`
+  gained an `x11` backend (`crates/input/src/x11`): XInput2 raw events
+  for capture, the XTEST extension's `FakeInput` for injection, via
+  `x11rb` (isolated to `cfg(target_os = "linux")`, `xinput`+`xtest`
+  features only, no system X11 dev packages needed — confirmed on real
+  hardware). A dynamic keycode↔keysym table (`x11::keymap`, queried
+  per-session via `GetKeyboardMapping`) bridges X11's non-portable
+  keycodes to the portable keysym layer (`x11::keysym`, unit-tested
+  exactly like the macOS/Windows keycode tables — 32 real `cargo test`
+  passes on the Ubuntu machine itself, not just cross-compiled).
+  One real bug was found and fixed during hardware QA (commit
+  `0e550fd`): every event was captured and injected twice, a documented
+  XInput2 pitfall (`XIAllDevices` matches slave devices too, not just
+  the master) — fixed by selecting `XIAllMasterDevices` instead,
+  reverified as fixed on the same hardware. Wayland: no code — a
+  formal, evidenced NO-GO for general-purpose global *capture* under
+  Wayland's current security model (the `org.freedesktop.portal.InputCapture`
+  mechanism that would enable it isn't supported by KWin even in KDE 6,
+  and Mutter's support is limited; injection alone has better portal
+  support via `RemoteDesktop`+`libei` but requires a per-session
+  consent dialog, incompatible with a silent background service, and
+  wasn't pursued for being half of what a bidirectional KVM needs).
+  Full rationale: [ADR-0008](adr/0008-linux-input-architecture.md).
+  Not exhaustively tested (noted, not blocking, same standard as
+  Phase 3's own minor gaps): function keys F6–F12, the key-repeat flag
+  under real held-key auto-repeat, horizontal scroll, a mid-session
+  keyboard layout change, and X11's permissive cross-privilege
+  injection behavior with an actual privilege-separated target.
   `protocol::Key` gained `#[derive(Hash)]` (purely additive, needed for
   `x11::keymap`'s reverse lookup) — the only change to any pre-existing
   Phase 1–3 code this phase made.

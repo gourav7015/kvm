@@ -1,118 +1,133 @@
 # Phase 3b Manual QA — Linux Input Engine (X11)
 
-Status when this was written: the X11 backend (`crates/input/src/x11`)
-compiles and passes `clippy -D warnings` when cross-checked from macOS
-via `cargo check --target x86_64-unknown-linux-gnu` /
-`cargo clippy --target x86_64-unknown-linux-gnu`, and its pure-logic
-unit tests (`x11::keysym`, `x11::keymap`, `x11::events`) compile as
-test binaries for that target. **None of this has been run against a
-real X server yet** — this development machine has no Linux display
-server to test against directly (see ADR-0008). Every row below is
-OPEN until performed on real Linux hardware.
+**Executed 2026-09-11** on a real Ubuntu 24.04.4 LTS machine (GNOME,
+X11 session, `XDG_SESSION_TYPE=x11`, `XDG_CURRENT_DESKTOP=ubuntu-xorg`,
+x86_64), paired with the same Mac used throughout Phase 3, over the LAN
+already proven in Phase 1c/2/3. Results below are from that run.
 
 No Wayland backend exists — ADR-0008 records a formal NO-GO for
 general-purpose capture under Wayland's current security model, so
-there is nothing to manually test there for now.
+there is nothing to manually test there.
 
-## 0. Prerequisites
+## 0. Prerequisites — dependency/environment verification
 
-On the Linux test machine:
+No extra system packages were needed. `x11rb`'s `RustConnection`
+implements Xauthority parsing in pure Rust (`x11rb_protocol::xauth`),
+so there's no linkage against `libX11`/`libXtst`/`libXi` at all — just
+Rust/cargo (already present) and the already-running X11 desktop
+session.
+
 ```
 git pull
 cargo build -p kvm-input
 cargo test -p kvm-input
+cargo build -p kvm-core --example input_relay
 ```
-Confirm `$XDG_SESSION_TYPE` is `x11` (not `wayland`) — `echo
-$XDG_SESSION_TYPE`. This backend will not work under a Wayland session
-even if X11 libraries are technically present, since it needs a real
-X11 *display server* to connect to, not just the client libraries.
 
-The XTEST extension must be enabled on the X server (it is by default
-on essentially every distribution's X.org; `xdpyinfo | grep XTEST`
-confirms).
+- Real Linux hardware: Ubuntu 24.04.4 LTS, GNOME, X11 (`ubuntu-xorg`
+  session), x86_64
+- Required apt packages: **none** beyond the stock desktop install
+- Build command: `cargo build -p kvm-core --example input_relay`
+- Run command: `cargo run -p kvm-core --example input_relay -- listen`
+  / `-- connect <ip>:51821`
 
-## 1. Automated tests, run for real (not just cross-compiled)
+## 1. Automated tests, run for real
 
 ```
 cargo test -p kvm-input
 ```
-This exercises `x11::keysym`'s round-trip tests, `x11::keymap`'s
-synthetic-table tests, and `x11::events`' pure event-conversion tests —
-all of which run identically to the macOS/Windows suites since none of
-them need a live X connection. This is the one thing on this list that
-*is* meaningfully verified by cross-compilation already (the code
-compiles and type-checks identically); running it for real just
-confirms no target-specific runtime surprise (e.g. an integer-width
-assumption that happens to hold on `x86_64-unknown-linux-gnu` but
-wasn't actually exercised).
+**PASS.** `test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured;
+0 filtered out` — `translate` (11), `x11::events` (12), `x11::keymap`
+(3), `x11::keysym` (6). Matches the cross-compiled count exactly (the
+`macos` module is absent on Linux, as expected).
 
-- [ ] PASS/FAIL: `cargo test -p kvm-input` passes with the same results as the macOS run
+## 2/3/4/5. Real cross-machine QA: Linux X11 ↔ macOS
 
-## 2. X11 capture — keyboard
+### Round A — Linux captures, Mac injects
 
-Using `examples/input_relay.rs` (once it gains an X11 `LocalCapture`/
-`LocalInject` selection — not yet wired up; until then, a small
-throwaway test binary calling `X11Capture`/`X11Inject` directly is the
-way to exercise this by hand) or a dedicated test binary:
+| Category | Result |
+|---|---|
+| Letters, digits | PASS |
+| Enter, Tab, Backspace, Escape, Space | PASS |
+| Arrow keys | PASS |
+| Function keys F1–F5 | PASS |
+| Bare Shift, Alt, Caps Lock, Super/Meta | PASS — all captured correctly (X11 has no `FlagsChanged`-style gap; modifier keys arrive as ordinary `RawKeyPress`/`RawKeyRelease`), and correctly **not** translated |
+| **Bare Control → Command translation** | **PASS** — confirmed live: `received ControlLeft -> translated+injected MetaLeft` |
+| Function keys F6–F12 | NOT TESTED |
+| Key-repeat flag on real auto-repeat | NOT TESTED (no key was held long enough to trigger OS auto-repeat during this session) |
+| Mouse move | PASS |
+| Left/right/middle click | PASS |
+| Scroll up/down | PASS |
+| Scroll left/right (horizontal) | NOT TESTED |
 
-- [ ] Letters, digits land correctly
-- [ ] Enter, Tab, Backspace, Escape, Space
-- [ ] Arrow keys
-- [ ] Function keys F1–F12
-- [ ] Bare Shift/Control/Alt/Super pressed alone — X11 should **not**
-      have the macOS `FlagsChanged`-style gap (XI2 reports modifier
-      keys as ordinary `RawKeyPress`/`RawKeyRelease` like any other
-      key), so this should work out of the box; confirm it actually
-      does
-- [ ] Left/right modifier variants distinguished correctly (`ShiftLeft`
-      vs `ShiftRight`, etc.)
-- [ ] Key-repeat flag (`KeyEventFlags::KEY_REPEAT`) correctly reflects
-      held-key auto-repeat
+**Real bug found and fixed during this round** (see ADR-0008's second
+Update note, commit `0e550fd`): every captured event was initially
+delivered and injected **twice**, consistently, across every key and
+mouse button tested. Root cause: `xi_select_events` selected raw events
+on `XIAllDevices`, a documented XInput2 pitfall (it additionally
+matches each underlying slave device a master is paired with). Fixed
+by switching to `XIAllMasterDevices`. Retested after the fix on the
+same hardware: zero duplicates across a full retest of the same
+category list above.
 
-## 3. X11 capture — mouse
+### Round B — Mac captures, Linux injects
 
-- [ ] Mouse move (relative deltas land correctly, not inverted or scaled wrong)
-- [ ] Left/middle/right click
-- [ ] Scroll up/down/left/right (button 4/5/6/7 convention)
+| Category | Result |
+|---|---|
+| Letters, digits (`hello123`) | PASS — confirmed via real terminal echo on Ubuntu |
+| Enter, Tab, Backspace | PASS |
+| Escape | PASS — real `ESC` (`^[`) landed |
+| Space | PASS |
+| Arrow keys | PASS — real cursor-movement ANSI codes (`^[[A`/`^[[B`/`^[[C`/`^[[D`) landed |
+| Function keys F1–F5 | PASS — real xterm function-key codes (`^[OP`, `^[OQ`, `^[OR`, `^[OS`, `^[[15~`) landed |
+| Mouse move | PASS |
+| Left/right/middle click | PASS |
+| Scroll up/down | PASS |
+| Bare Shift | PASS — captured, correctly not translated |
+| Bare Control (Mac's own) | PASS — captured, correctly **not** translated (matches `mac_control_key_itself_is_not_remapped`) |
+| Bare Option/Alt | PASS — captured, correctly not translated |
+| **Bare Command → Control translation** | **PASS** — confirmed live: `received MetaLeft -> translated+injected ControlLeft` |
+| Shift+letter combo (real capital output) | **PASS** — Shift+A on the Mac produced a real capital `A` on Ubuntu, confirming combo shortcuts work the same way already proven for Mac↔Windows (each key injected as its own correctly-ordered event; no protocol change needed) |
+| **Real interrupt signal propagation** | **PASS** — Control+C (via Command+C→Control+C translation) injected from the Mac genuinely interrupted a running `sleep 100` process in a focused Ubuntu terminal. Real, functional, strongest form of evidence for this capability. |
+| Bare Caps Lock | **Not captured — expected, not a new bug.** Same pre-existing, documented Phase 3 limitation (ADR-0007): Caps Lock's flag is a toggle, not a held-state, and was deliberately excluded from the `FlagsChanged`-diffing fix. This is the macOS *capture* side's known gap, independent of the Linux backend. |
 
-## 4. X11 injection — keyboard and mouse
+## 6. Local-input preservation and disconnect/reconnect (Matrix C/D)
 
-Same categories as above, this time verifying `X11Inject` actually
-lands the event in a focused window (a text editor for keyboard, any
-window for mouse).
+- **Local input preservation**: **PASS** — confirmed the Ubuntu
+  machine's own keyboard/mouse kept working normally throughout every
+  round of testing; capture never blocked or stole local input (no
+  exclusive grab is used, per ADR-0008 decision 1's design).
+- **Listener termination / peer reconnect**: **PASS** — exercised many
+  times across this session (killed and restarted both the listener
+  and connector repeatedly); each fresh `listen`/`connect` cycle
+  reconnected cleanly.
+- **Modifier held during an abrupt disconnect**: **PASS** — held Shift
+  down on the Mac, force-killed the Mac-side connector process
+  mid-hold (simulating an abrupt disconnect while a modifier was
+  logically "down" on the injecting side), then typed a lowercase
+  letter directly on the Ubuntu keyboard with **no** further Shift
+  interaction. A real lowercase `a` appeared — Shift did not get stuck
+  in a held state on the X server after the connection died.
 
-- [ ] Keyboard categories from §2, injected correctly
-- [ ] Mouse categories from §3, injected correctly
+## 7. Known, documented gaps — confirmed as expected, not bugs
 
-## 5. Cross-machine: X11 ↔ macOS/Windows
+- Keyboard layout switched mid-session: **NOT TESTED** this round.
+- X11's permissive security model (injected input reaching a
+  different-privilege window, unlike Windows' UAC restriction): **NOT
+  TESTED** with an actual privilege-separated target this round — this
+  is an inherent, well-understood X11 property (ADR-0008 decision 1),
+  not something this code could change either way, so it wasn't
+  treated as blocking.
 
-Once §2–4 pass locally, repeat the real cross-machine test Phase 3 did
-for macOS↔Windows, this time Linux↔macOS and/or Linux↔Windows:
+## 8. Security verification
 
-- [ ] Linux capture → macOS/Windows inject, keyboard + mouse
-- [ ] macOS/Windows capture → Linux inject, keyboard + mouse
-- [ ] Modifier translation: Linux's Control is treated identically to
-      Windows' Control by `translate_for_target` (Linux↔macOS should
-      translate exactly like Windows↔macOS already does; Linux↔Windows
-      should never translate, both already agree Control is primary)
-
-## 6. Known, documented gaps — not bugs to chase, just confirm they behave as expected
-
-- [ ] Keyboard layout switched mid-session: confirm the keymap goes
-      stale as documented (ADR-0008 decision 1) rather than crashing or
-      silently corrupting input — restart should pick up the new layout
-- [ ] X11's permissive security model: unlike Windows' UAC test,
-      confirm injected input *does* reach a window owned by a different
-      user-privilege process if you have one to test against (e.g. a
-      `sudo`'d application) — this is *expected*, not a bug, per
-      ADR-0008 decision 1; X11 has no equivalent restriction to Windows'
-      UIPI, and this code doesn't add one
-
-## 7. Environment actually used for this QA
-
-Fill in once run:
-- Distribution + version: ______
-- Desktop environment: ______
-- `$XDG_SESSION_TYPE`: ______
-- X server: ______
-- Date: ______
+- Input still only flows over an already-authenticated `net::Peer` —
+  unchanged by the Linux backend; `X11Capture`/`X11Inject` sit behind
+  the same `Capture`/`Inject` trait boundary every other backend uses,
+  with no new networking or trust path.
+- No new unauthenticated input path was introduced — confirmed by code
+  review, not just this session's live testing (the X11 backend has no
+  code path that bypasses `core::input_bridge`/`net::Peer`).
+- X11's own permissiveness (any X client can observe/synthesize input
+  for any other client) is a documented, inherent OS-level property
+  (ADR-0008), not something this code opts into or could opt out of.

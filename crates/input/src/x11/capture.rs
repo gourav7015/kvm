@@ -33,9 +33,20 @@ fn raw_event_mask() -> XIEventMask {
         | XIEventMask::RAW_MOTION
 }
 
-/// `XIAllDevices`, per the XInput2 protocol spec — selects raw events
-/// from every input device, not just one specific keyboard/pointer.
-const XI_ALL_DEVICES: u8 = 0;
+/// `XIAllMasterDevices`, per the XInput2 protocol spec — selects raw
+/// events from every *logical* (master) keyboard/pointer pair.
+///
+/// Deliberately not `XIAllDevices` (value `0`): a real hardware run
+/// found that selecting raw events on `XIAllDevices` delivers every
+/// event twice on this machine — a known XInput2 pitfall, since
+/// `XIAllDevices` additionally matches each underlying physical/slave
+/// device a master is paired with, not just the master's own merged
+/// stream. `XIAllMasterDevices` receives exactly one raw event per
+/// logical device pair (normally "Virtual core keyboard" +
+/// "Virtual core pointer"), which is what a capture tool actually
+/// wants — one event per real keypress/click, not one per device layer
+/// it passed through.
+const XI_ALL_MASTER_DEVICES: u8 = 1;
 
 /// Global, listen-only capture of this machine's keyboard and mouse via
 /// XInput2 raw events, selected on the root window. Requires an X11
@@ -146,7 +157,7 @@ fn run(
     conn.xinput_xi_select_events(
         root,
         &[EventMask {
-            deviceid: XI_ALL_DEVICES.into(),
+            deviceid: XI_ALL_MASTER_DEVICES.into(),
             mask: vec![raw_event_mask()],
         }],
     )

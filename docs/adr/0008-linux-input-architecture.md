@@ -4,6 +4,23 @@
 
 Accepted (2026-09-11)
 
+**Update (2026-09-11, during real Ubuntu 24.04/GNOME/X11 hardware QA):**
+every captured event was being reported and injected exactly twice —
+confirmed across keyboard, mouse buttons, and scroll, with completely
+consistent 2x duplication. Root cause: decision 1's `xi_select_events`
+call selected raw events on `XIAllDevices` (deviceid `0`), a
+well-documented XInput2 pitfall — `XIAllDevices` additionally matches
+each underlying physical/slave device a master is paired with, not just
+the master's own merged stream, so a single physical keypress can be
+delivered once via the slave-level registration and once via the
+master-level one. Fixed by selecting on `XIAllMasterDevices` (deviceid
+`1`) instead, which receives exactly one raw event per logical
+keyboard/pointer pair. Not unit-testable in isolation (it's a runtime
+X-server device-topology interaction, not a pure function — the same
+category as ADR-0007's `CAPTURED_EVENT_TYPES` list, verified by manual
+QA rather than a unit test); re-verified as fixed via a live retest on
+the same Ubuntu machine.
+
 ## Context
 
 Phase 3 (ADR-0007) built and hardware-verified the macOS↔Windows input

@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
-use kvm_core::{Edge, Layout, LayoutDevice, OwnershipState, Session, become_target};
+use kvm_core::{Edge, Layout, LayoutDevice, OwnershipState, Session, run_target};
 use kvm_identity::DeviceKeypair;
 use kvm_input::{Inject, InputError, PointerGeometry};
 use kvm_net::{IdentityCert, Peer, TrustCheck};
@@ -148,7 +148,7 @@ async fn edge_crossing_switches_active_target_and_warps_the_targets_cursor() {
         let received = target_received.clone();
         tokio::spawn(async move {
             let mut inject = FakeInject { received };
-            become_target(&mut peer_b, &mut target_geometry, &mut inject).await
+            run_target(&mut peer_b, &mut target_geometry, &mut inject).await
         })
     };
 
@@ -189,6 +189,108 @@ async fn edge_crossing_switches_active_target_and_warps_the_targets_cursor() {
         *target_received.lock().unwrap(),
         vec![InputMessage::MouseMove { dx: 10, dy: 5 }]
     );
+
+    drop(session);
+    let _ = target_task.await;
+}
+
+#[tokio::test]
+async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
+    let a = Device::new([20u8; 32]);
+    let b = Device::new([21u8; 32]);
+    let (peer_a, mut peer_b) = connect_pair(&a, &b).await;
+
+    // A two-way edge: A's right neighbor is B, and B's left neighbor is
+    // A, so ownership can bounce back and forth repeatedly.
+    let mut layout = Layout::new();
+    layout.add_device(LayoutDevice {
+        device_id: a.device_id,
+        label: "a".to_string(),
+        enabled: true,
+    });
+    layout.add_device(LayoutDevice {
+        device_id: b.device_id,
+        label: "b".to_string(),
+        enabled: true,
+    });
+    layout
+        .set_neighbor(a.device_id, Edge::Right, b.device_id)
+        .unwrap();
+    layout
+        .set_neighbor(b.device_id, Edge::Left, a.device_id)
+        .unwrap();
+
+    let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
+    session.add_peer(b.device_id, peer_a, (1000, 800));
+
+    let target_position = Arc::new(Mutex::new((999, 999)));
+    let mut target_geometry = FakeGeometry {
+        position: target_position.clone(),
+    };
+    let target_task = tokio::spawn(async move {
+        let mut inject = FakeInject {
+            received: Arc::new(Mutex::new(Vec::new())),
+        };
+        run_target(&mut peer_b, &mut target_geometry, &mut inject).await
+    });
+
+    for round in 0..3 {
+        // Reset to the same starting position every round, so each
+        // round's expected warp target is identical and independent of
+        // the last -- isolating "does every return re-warp" from any
+        // accumulated-position arithmetic.
+        session.resync_local_position(500, 400);
+
+        // -> Forwarding(B): warps B's cursor to the entry position.
+        session
+            .handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 })
+            .await
+            .unwrap();
+        assert!(matches!(
+            session.ownership_state(),
+            OwnershipState::Forwarding { target, .. } if target == b.device_id
+        ));
+
+        // Perturb B's cursor away from the expected warp target, so a
+        // later round that *didn't* re-warp would be caught (rather
+        // than passing by coincidence because it was already there
+        // from the previous round).
+        *target_position.lock().unwrap() = (777, 777);
+
+        // -> Local: crossing back through B's Left edge.
+        session
+            .handle_captured(InputMessage::MouseMove { dx: -1100, dy: 0 })
+            .await
+            .unwrap();
+        assert_eq!(session.ownership_state(), OwnershipState::Local);
+        session.resync_local_position(500, 400);
+
+        // -> Forwarding(B) again: must re-warp to (0, 400), not
+        // silently leave B's cursor at the perturbed (777, 777).
+        session
+            .handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 })
+            .await
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if *target_position.lock().unwrap() == (0, 400) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "round {round}: timed out waiting for B's cursor to be re-warped to (0, 400)"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Cross back once more so the next round starts from Local.
+        session
+            .handle_captured(InputMessage::MouseMove { dx: -1100, dy: 0 })
+            .await
+            .unwrap();
+        assert_eq!(session.ownership_state(), OwnershipState::Local);
+    }
 
     drop(session);
     let _ = target_task.await;

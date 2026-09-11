@@ -21,4 +21,4 @@ pub use ownership::{
 pub use pairing::{PairingError, PairingEvent, PairingState, transition};
 pub use pairing_session::{commit_if_completed, run_acceptor, run_initiator};
 pub use router::{Effect, Router};
-pub use session::{Session, become_target};
+pub use session::{Session, run_target};

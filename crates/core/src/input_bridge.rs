@@ -34,7 +34,7 @@ pub(crate) const LOCAL_PLATFORM: PlatformKind = PlatformKind::Linux;
 /// macOS, everything else unchanged) to a `Key` event before it's
 /// injected locally. Non-`Key` events pass through untouched — mouse
 /// events carry no platform-specific modifier role to translate.
-fn translate_for_local_platform(event: InputMessage) -> InputMessage {
+pub(crate) fn translate_for_local_platform(event: InputMessage) -> InputMessage {
     match event {
         InputMessage::Key {
             key,

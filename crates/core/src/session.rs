@@ -8,13 +8,14 @@
 //! already-authenticated peer connections.
 //!
 //! **The receiving/target side needs nothing from this module beyond
-//! [`become_target`].** A device that becomes someone else's forwarding
+//! [`run_target`].** A device that becomes someone else's forwarding
 //! target doesn't run a [`Session`] at all — it just warps its cursor
-//! once via [`kvm_input::PointerGeometry::set_cursor_position`], then
-//! injects whatever arrives on the peer's input stream via the existing
-//! Phase 3 [`crate::inject_from_peer`], including the modifier-release
-//! events the source's `Router` synthesizes, which travel as perfectly
-//! ordinary [`InputMessage`]s on that same stream.
+//! via [`kvm_input::PointerGeometry::set_cursor_position`] every time
+//! ownership arrives (correctly handling rapid back-and-forth, not just
+//! the first switch), and injects whatever arrives on the peer's input
+//! stream, including the modifier-release events the source's `Router`
+//! synthesizes, which travel as perfectly ordinary [`InputMessage`]s on
+//! that same stream.
 //!
 //! **Known limitation, tracked for a later milestone**: every backend's
 //! `Capture` is listen-only (no exclusive grab — ADR-0007/ADR-0008), so
@@ -32,8 +33,7 @@ use kvm_net::{NetError, Peer};
 use kvm_protocol::{ControlMessage, DeviceId, InputMessage, Message};
 
 use crate::error::CoreError;
-use crate::input_bridge::LOCAL_PLATFORM;
-use crate::input_bridge::inject_from_peer;
+use crate::input_bridge::{LOCAL_PLATFORM, translate_for_local_platform};
 use crate::layout::Layout;
 use crate::ownership::OwnershipState;
 use crate::router::{Effect, Router};
@@ -172,29 +172,49 @@ impl Session {
     }
 }
 
-/// Runs on the target side: waits for the `SwitchActive` naming this
-/// device, warps the local cursor to the position it carries via
-/// `geometry`, then injects every `Input` message that follows on
-/// `peer`'s input stream — reusing `inject_from_peer` verbatim, since a
-/// target needs nothing beyond "place the cursor, then inject whatever
-/// arrives."
-pub async fn become_target(
+/// Runs on the target side for the whole lifetime of one peer
+/// connection — not just the first switch. Concurrently waits for
+/// `SwitchActive` (warping the local cursor via `geometry` every time
+/// ownership arrives, not only the first) and injects whatever arrives
+/// on the input stream, so rapid back-and-forth switching (ownership
+/// leaving this device and later returning) is handled correctly: a
+/// later return warps the cursor again to the newly computed entry
+/// position rather than silently resuming wherever it was left.
+pub async fn run_target(
     peer: &mut Peer,
     geometry: &mut dyn PointerGeometry,
     inject: &mut dyn Inject,
 ) -> Result<(), CoreError> {
-    match peer.recv_control().await? {
-        ControlMessage::SwitchActive {
-            cursor_position: (x, y),
-            ..
-        } => {
-            geometry.set_cursor_position(x, y)?;
-        }
-        other => {
-            return Err(CoreError::Net(NetError::ProtocolViolation(format!(
-                "expected a SwitchActive control message, got {other:?}"
-            ))));
+    let control = &mut peer.streams.control;
+    let input = &mut peer.streams.input;
+    loop {
+        tokio::select! {
+            control_msg = control.recv() => {
+                match control_msg {
+                    Ok(Message::Control(ControlMessage::SwitchActive { cursor_position: (x, y), .. })) => {
+                        geometry.set_cursor_position(x, y)?;
+                    }
+                    Ok(other) => {
+                        return Err(CoreError::Net(NetError::ProtocolViolation(format!(
+                            "expected a SwitchActive control message, got {other:?}"
+                        ))));
+                    }
+                    Err(NetError::ConnectionClosed) => return Ok(()),
+                    Err(e) => return Err(CoreError::Net(e)),
+                }
+            }
+            input_msg = input.recv() => {
+                match input_msg {
+                    Ok(Message::Input(event)) => inject.inject(&translate_for_local_platform(event))?,
+                    Ok(other) => {
+                        return Err(CoreError::Net(NetError::ProtocolViolation(format!(
+                            "expected an Input message on the input stream, got {other:?}"
+                        ))));
+                    }
+                    Err(NetError::ConnectionClosed) => return Ok(()),
+                    Err(e) => return Err(CoreError::Net(e)),
+                }
+            }
         }
     }
-    inject_from_peer(inject, &mut peer.streams.input).await
 }

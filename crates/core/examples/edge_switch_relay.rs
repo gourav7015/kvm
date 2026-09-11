@@ -220,8 +220,27 @@ mod real {
         });
 
         let mut last_state = session.ownership_state();
+        // TEMPORARY diagnostic instrument (Bug 9 root-cause hunt): reads
+        // the OS's own reported cursor position on a fixed cadence,
+        // completely independent of the capture tap's own event stream
+        // -- this is the direct, "ground truth" check for whether
+        // suppression is actually freezing the visible cursor, rather
+        // than inferring it from a code path having executed. Only
+        // logged while genuinely useful (Forwarding), so a normal
+        // session isn't flooded.
+        let mut ground_truth = tokio::time::interval(std::time::Duration::from_millis(300));
         loop {
             tokio::select! {
+                _ = ground_truth.tick() => {
+                    if !matches!(session.ownership_state(), OwnershipState::Local)
+                        && let Ok(pos) = geometry.cursor_position()
+                    {
+                        println!(
+                            "ground-truth check: real OS cursor position while {:?} is {pos:?}",
+                            session.ownership_state()
+                        );
+                    }
+                }
                 event = async_rx.recv() => {
                     let Some(event) = event else {
                         println!("capture ended");

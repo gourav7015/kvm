@@ -6,6 +6,7 @@ use std::mem::size_of;
 
 use kvm_protocol::{ButtonState, InputMessage, MouseButton};
 use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
@@ -28,6 +29,22 @@ pub struct WindowsInject;
 
 impl WindowsInject {
     pub fn new() -> Self {
+        // TEMPORARY diagnostic tracing (pointer-range root-cause hunt):
+        // this process's system DPI. `GetSystemMetrics`/`GetCursorPos`/
+        // `SetCursorPos` all report/accept coordinates in this same
+        // process's DPI-awareness space -- if that space isn't 100%
+        // scale (96 DPI), the "logical" screen size this process reads
+        // is not the panel's native pixel resolution, which is a real
+        // candidate for "only part of the screen is reachable" if
+        // anything elsewhere in the pipeline assumes native pixels.
+        // SAFETY: `GetDpiForSystem` takes no arguments and has no
+        // preconditions.
+        let dpi = unsafe { GetDpiForSystem() };
+        tracing::info!(
+            dpi,
+            scale_percent = (dpi as f64 / 96.0 * 100.0) as u32,
+            "WindowsInject: system DPI at construction"
+        );
         Self
     }
 }
@@ -114,10 +131,29 @@ impl Inject for WindowsInject {
                 // documented contract.
                 unsafe { GetCursorPos(&mut point) }
                     .map_err(|e| InputError::InjectFailed(format!("GetCursorPos failed: {e}")))?;
+                let (target_x, target_y) = (point.x + dx, point.y + dy);
                 // SAFETY: plain integer coordinates, no buffer/pointer
                 // contract to uphold.
-                unsafe { SetCursorPos(point.x + dx, point.y + dy) }
-                    .map_err(|e| InputError::InjectFailed(format!("SetCursorPos failed: {e}")))
+                let result = unsafe { SetCursorPos(target_x, target_y) }
+                    .map_err(|e| InputError::InjectFailed(format!("SetCursorPos failed: {e}")));
+                // TEMPORARY diagnostic tracing (pointer-range root-cause
+                // hunt): read the position back immediately after
+                // setting it. If this ever disagrees with
+                // (target_x, target_y), the OS itself is clamping or
+                // rescaling the write -- direct evidence of target-side
+                // clamping/coordinate-space mismatch, not an inference.
+                let mut after = POINT { x: 0, y: 0 };
+                // SAFETY: same contract as the read above.
+                let readback_ok = unsafe { GetCursorPos(&mut after) }.is_ok();
+                tracing::info!(
+                    before = ?(point.x, point.y),
+                    dx, dy,
+                    intended = ?(target_x, target_y),
+                    actual = ?(readback_ok.then_some((after.x, after.y))),
+                    matched = readback_ok && (after.x, after.y) == (target_x, target_y),
+                    "WindowsInject: relative move applied via GetCursorPos+SetCursorPos"
+                );
+                result
             }
             InputMessage::MouseButton { button, state } => {
                 // "Other" extra buttons have no dedicated MOUSEEVENTF_*
@@ -173,13 +209,39 @@ impl PointerGeometry for WindowsInject {
                 "GetSystemMetrics reported a non-positive screen size".to_string(),
             ));
         }
+        // TEMPORARY diagnostic tracing (pointer-range root-cause hunt):
+        // this is the exact value exchanged over the wire and used by
+        // the Mac's Router for its resolution-aware handoff math -- if
+        // it disagrees with the panel's real native resolution (e.g.
+        // because of DPI virtualization), every downstream rescale is
+        // computed against the wrong denominator.
+        tracing::info!(
+            width,
+            height,
+            "WindowsInject: screen_size() reported (this value drives the Mac-side handoff rescale math)"
+        );
         Ok((width as u32, height as u32))
     }
 
     fn set_cursor_position(&mut self, x: i32, y: i32) -> Result<(), InputError> {
         // SAFETY: `SetCursorPos` takes plain integer coordinates, no
         // buffer/pointer contract to uphold.
-        unsafe { SetCursorPos(x, y) }
-            .map_err(|e| InputError::InjectFailed(format!("SetCursorPos failed: {e}")))
+        let result = unsafe { SetCursorPos(x, y) }
+            .map_err(|e| InputError::InjectFailed(format!("SetCursorPos failed: {e}")));
+        // TEMPORARY diagnostic tracing (pointer-range root-cause hunt):
+        // this is the SwitchActive warp -- the very first position the
+        // cursor lands at on entering this screen. Read back
+        // immediately to check whether the OS actually placed it where
+        // asked.
+        let mut after = POINT { x: 0, y: 0 };
+        // SAFETY: same contract as every other GetCursorPos call above.
+        let readback_ok = unsafe { GetCursorPos(&mut after) }.is_ok();
+        tracing::info!(
+            intended = ?(x, y),
+            actual = ?(readback_ok.then_some((after.x, after.y))),
+            matched = readback_ok && (after.x, after.y) == (x, y),
+            "WindowsInject: set_cursor_position (handoff warp) applied"
+        );
+        result
     }
 }

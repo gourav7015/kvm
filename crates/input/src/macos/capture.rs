@@ -159,7 +159,33 @@ impl Capture for MacCapture {
                         // forwarding target always gets it) -- only
                         // whether this machine's *own* OS also acts on
                         // it depends on `suppress` (ADR-0009 decision 9).
-                        if suppress.load(Ordering::Relaxed) {
+                        let suppressed = suppress.load(Ordering::Relaxed);
+                        // TEMPORARY diagnostic tracing (Bug 9 root-cause
+                        // hunt): direct, per-event runtime proof of (a)
+                        // whether the callback is actually observing this
+                        // event at all while forwarding, and (b) what
+                        // disposition it actually chose -- not merely
+                        // that the suppression code path was reached.
+                        // Restrict to the event kinds suppression cares
+                        // about so a normal Local session isn't flooded.
+                        if matches!(
+                            event_type,
+                            CGEventType::MouseMoved
+                                | CGEventType::LeftMouseDragged
+                                | CGEventType::RightMouseDragged
+                                | CGEventType::OtherMouseDragged
+                                | CGEventType::KeyDown
+                                | CGEventType::KeyUp
+                                | CGEventType::FlagsChanged
+                        ) {
+                            tracing::info!(
+                                ?event_type,
+                                suppressed,
+                                disposition = if suppressed { "drop" } else { "keep" },
+                                "tap callback observed event"
+                            );
+                        }
+                        if suppressed {
                             CallbackResult::Drop
                         } else {
                             CallbackResult::Keep
@@ -231,18 +257,31 @@ impl Capture for MacCapture {
 
     fn set_local_suppression(&mut self, suppress: bool) {
         self.suppress.store(suppress, Ordering::Relaxed);
+        // TEMPORARY diagnostic tracing (Bug 9 root-cause hunt): proves
+        // this method was actually called (and with what value) --
+        // "the code path executed" is not itself evidence the OS
+        // behavior changed, so this alone does not close the question,
+        // but its absence would immediately rule out "never called" as
+        // the cause.
+        tracing::info!(suppress, "set_local_suppression called");
         // See the struct doc: dropping the CGEvent alone does not stop
         // the OS from moving the visible cursor in response to raw HID
-        // motion -- that needs this separate association toggle. A
-        // failure here is logged, not fatal: capture keeps running
-        // either way, and the tap-level Drop above still stops
-        // keyboard/button events from reaching local apps regardless.
-        if let Err(e) = CGDisplay::associate_mouse_and_mouse_cursor_position(!suppress) {
-            tracing::warn!(
+        // motion -- that needs this separate association toggle. Logged
+        // on both success and failure (not just failure) so a passing
+        // Ok(()) here can be directly checked against whether the real
+        // cursor position actually stopped moving (a separate,
+        // independent measurement -- see edge_switch_relay.rs).
+        match CGDisplay::associate_mouse_and_mouse_cursor_position(!suppress) {
+            Ok(()) => tracing::info!(
+                suppress,
+                connected = !suppress,
+                "CGAssociateMouseAndMouseCursorPosition succeeded"
+            ),
+            Err(e) => tracing::warn!(
                 error = ?e,
                 suppress,
-                "failed to toggle mouse/cursor association"
-            );
+                "CGAssociateMouseAndMouseCursorPosition failed"
+            ),
         }
     }
 }

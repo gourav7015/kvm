@@ -5,14 +5,14 @@
 use kvm_protocol::{ButtonState, InputMessage, MouseButton};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
-    MOTION_NOTIFY_EVENT,
+    BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _, KEY_PRESS_EVENT,
+    KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, Window,
 };
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
 use crate::error::InputError;
-use crate::traits::Inject;
+use crate::traits::{Inject, PointerGeometry};
 use crate::x11::keymap::KeyMap;
 use crate::x11::keysym::key_to_keysym;
 
@@ -28,6 +28,10 @@ const CURRENT_TIME: u32 = 0;
 /// relative offset from the pointer's current position, not an
 /// absolute screen position.
 const MOTION_RELATIVE: u8 = 1;
+/// `detail` value for `MotionNotify` meaning the coordinates are an
+/// absolute position in the root window's coordinate space — the
+/// other branch of the same request, used for [`PointerGeometry::set_cursor_position`].
+const MOTION_ABSOLUTE: u8 = 0;
 
 /// Injects keyboard/mouse events on this machine via `XTestFakeInput`.
 /// Needs an active X11 connection with XTEST-permitted access — no
@@ -35,15 +39,17 @@ const MOTION_RELATIVE: u8 = 1;
 pub struct X11Inject {
     conn: RustConnection,
     keymap: KeyMap,
+    root: Window,
 }
 
 impl X11Inject {
     pub fn new() -> Result<Self, InputError> {
-        let (conn, _screen_num) = x11rb::connect(None).map_err(|e| {
+        let (conn, screen_num) = x11rb::connect(None).map_err(|e| {
             InputError::InjectFailed(format!("failed to connect to the X server: {e}"))
         })?;
         let keymap = KeyMap::query(&conn).map_err(InputError::InjectFailed)?;
-        Ok(Self { conn, keymap })
+        let root = conn.setup().roots[screen_num].root;
+        Ok(Self { conn, keymap, root })
     }
 }
 
@@ -106,6 +112,34 @@ impl Inject for X11Inject {
                 Ok(())
             }
         }
+    }
+}
+
+impl PointerGeometry for X11Inject {
+    fn cursor_position(&self) -> Result<(i32, i32), InputError> {
+        let reply = self
+            .conn
+            .query_pointer(self.root)
+            .map_err(|e| InputError::InjectFailed(format!("QueryPointer request failed: {e}")))?
+            .reply()
+            .map_err(|e| InputError::InjectFailed(format!("QueryPointer reply failed: {e}")))?;
+        Ok((i32::from(reply.root_x), i32::from(reply.root_y)))
+    }
+
+    fn screen_size(&self) -> Result<(u32, u32), InputError> {
+        let reply = self
+            .conn
+            .get_geometry(self.root)
+            .map_err(|e| InputError::InjectFailed(format!("GetGeometry request failed: {e}")))?
+            .reply()
+            .map_err(|e| InputError::InjectFailed(format!("GetGeometry reply failed: {e}")))?;
+        Ok((u32::from(reply.width), u32::from(reply.height)))
+    }
+
+    fn set_cursor_position(&mut self, x: i32, y: i32) -> Result<(), InputError> {
+        let root_x = x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        let root_y = y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        self.fake_input(MOTION_NOTIFY_EVENT, MOTION_ABSOLUTE, root_x, root_y)
     }
 }
 

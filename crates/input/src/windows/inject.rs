@@ -5,16 +5,19 @@
 use std::mem::size_of;
 
 use kvm_protocol::{ButtonState, InputMessage, MouseButton};
+use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
     MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
-use windows::Win32::UI::WindowsAndMessaging::XBUTTON1;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos, XBUTTON1,
+};
 
 use crate::error::InputError;
-use crate::traits::Inject;
+use crate::traits::{Inject, PointerGeometry};
 use crate::windows::keycode::key_to_vk;
 
 /// Injects keyboard/mouse events on this machine via `SendInput`. No UAC
@@ -119,5 +122,37 @@ impl Inject for WindowsInject {
                 send(mouse_input(0, 0, dy as u32, MOUSEEVENTF_WHEEL.0))
             }
         }
+    }
+}
+
+impl PointerGeometry for WindowsInject {
+    fn cursor_position(&self) -> Result<(i32, i32), InputError> {
+        let mut point = POINT { x: 0, y: 0 };
+        // SAFETY: `point` is a valid, fully-initialized `POINT` the API
+        // writes into; matches `GetCursorPos`'s documented contract.
+        unsafe { GetCursorPos(&mut point) }
+            .map_err(|e| InputError::InjectFailed(format!("GetCursorPos failed: {e}")))?;
+        Ok((point.x, point.y))
+    }
+
+    fn screen_size(&self) -> Result<(u32, u32), InputError> {
+        // SAFETY: `GetSystemMetrics` takes a plain enum value and
+        // returns a plain integer, no buffer/pointer contract to
+        // uphold.
+        let (width, height) =
+            unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+        if width <= 0 || height <= 0 {
+            return Err(InputError::InjectFailed(
+                "GetSystemMetrics reported a non-positive screen size".to_string(),
+            ));
+        }
+        Ok((width as u32, height as u32))
+    }
+
+    fn set_cursor_position(&mut self, x: i32, y: i32) -> Result<(), InputError> {
+        // SAFETY: `SetCursorPos` takes plain integer coordinates, no
+        // buffer/pointer contract to uphold.
+        unsafe { SetCursorPos(x, y) }
+            .map_err(|e| InputError::InjectFailed(format!("SetCursorPos failed: {e}")))
     }
 }

@@ -1,0 +1,200 @@
+//! Async orchestration for edge-based switching — see ADR-0009. The one
+//! place `core` holds more than one [`kvm_net::Peer`] at a time.
+//!
+//! Splits cleanly along this codebase's established pure/async line
+//! (mirroring `pairing.rs`/`pairing_session.rs`): [`crate::router::Router`]
+//! makes every routing decision as pure data, unit-tested with zero I/O;
+//! [`Session`] here just turns those decisions into real sends over
+//! already-authenticated peer connections.
+//!
+//! **The receiving/target side needs nothing from this module beyond
+//! [`become_target`].** A device that becomes someone else's forwarding
+//! target doesn't run a [`Session`] at all — it just warps its cursor
+//! once via [`kvm_input::PointerGeometry::set_cursor_position`], then
+//! injects whatever arrives on the peer's input stream via the existing
+//! Phase 3 [`crate::inject_from_peer`], including the modifier-release
+//! events the source's `Router` synthesizes, which travel as perfectly
+//! ordinary [`InputMessage`]s on that same stream.
+//!
+//! **Known limitation, tracked for a later milestone**: every backend's
+//! `Capture` is listen-only (no exclusive grab — ADR-0007/ADR-0008), so
+//! while `Forwarding`, the capturing device's own OS still visibly
+//! applies captured input locally too, even though `Router` correctly
+//! avoids re-injecting or double-routing it. Actually suppressing local
+//! input while forwarding needs the per-OS `Capture` backends to grow a
+//! blocking mode — real-hardware work for Milestone 4/5, not something
+//! `Session`'s fakes-only integration tests can exercise.
+
+use std::collections::HashMap;
+
+use kvm_input::{Inject, PointerGeometry};
+use kvm_net::{NetError, Peer};
+use kvm_protocol::{ControlMessage, DeviceId, InputMessage, Message};
+
+use crate::error::CoreError;
+use crate::input_bridge::LOCAL_PLATFORM;
+use crate::input_bridge::inject_from_peer;
+use crate::layout::Layout;
+use crate::ownership::OwnershipState;
+use crate::router::{Effect, Router};
+
+/// Drives edge-switching from the capturing device's side. Holds every
+/// peer this device might directly forward to — not just immediate
+/// layout neighbors, since a multi-hop chain forwards directly once
+/// ownership reaches a third/fourth device (see `router.rs`/ADR-0009).
+pub struct Session {
+    router: Router,
+    peers: HashMap<DeviceId, Peer>,
+}
+
+impl Session {
+    pub fn new(
+        our_device_id: DeviceId,
+        layout: Layout,
+        our_screen_size: (u32, u32),
+        initial_position: (i32, i32),
+    ) -> Self {
+        Self {
+            router: Router::new(
+                our_device_id,
+                LOCAL_PLATFORM,
+                layout,
+                our_screen_size,
+                initial_position,
+            ),
+            peers: HashMap::new(),
+        }
+    }
+
+    pub fn ownership_state(&self) -> OwnershipState {
+        self.router.state()
+    }
+
+    /// Registers an already-authenticated peer as a possible switch
+    /// target. Only ever call this with a `Peer` obtained from
+    /// `net::connect`/`accept` (already TLS/trust-store verified) — see
+    /// ADR-0009's security section. There is no other way for a device
+    /// to become reachable through a `Session`: `Router` cannot name a
+    /// device that wasn't registered here first.
+    pub fn add_peer(&mut self, device_id: DeviceId, peer: Peer, screen_size: (u32, u32)) {
+        tracing::info!(
+            ?device_id,
+            ?screen_size,
+            "peer connected, now a valid switch target"
+        );
+        self.router.set_peer_connected(device_id, screen_size);
+        self.peers.insert(device_id, peer);
+    }
+
+    /// Removes a peer (disconnect or revocation). If it was the current
+    /// forwarding target, ownership snaps back to `Local` immediately —
+    /// see ADR-0009: a disconnected target must never keep holding
+    /// ownership, freeze the pointer, or drop keyboard input.
+    pub fn remove_peer(&mut self, device_id: DeviceId) {
+        let was_active_target = matches!(
+            self.router.state(),
+            OwnershipState::Forwarding { target, .. } if target == device_id
+        );
+        self.peers.remove(&device_id);
+        self.router.set_peer_disconnected(device_id);
+        if was_active_target {
+            tracing::warn!(
+                ?device_id,
+                "active forwarding target disconnected, falling back to local input"
+            );
+        } else {
+            tracing::info!(?device_id, "peer disconnected");
+        }
+    }
+
+    /// Re-anchors the router's tracked cursor position to a real OS
+    /// reading. Callers should do this after regaining `Local`
+    /// ownership (a normal switch back, or a forced-local after a
+    /// disconnect) — `Router` has no way to know the real cursor
+    /// position on its own.
+    pub fn resync_local_position(&mut self, x: i32, y: i32) {
+        self.router.resync_position(x, y);
+    }
+
+    /// Processes one locally captured event end to end: asks `Router`
+    /// what should happen, then makes it happen for real. A send that
+    /// fails because a peer's connection has actually died is treated
+    /// as that peer disconnecting — handled the same way `remove_peer`
+    /// handles it, not surfaced as a fatal session error, matching the
+    /// DoD's "a disconnected target must not crash the session."
+    pub async fn handle_captured(&mut self, event: InputMessage) -> Result<(), CoreError> {
+        for effect in self.router.handle_captured(event) {
+            self.apply(effect).await?;
+        }
+        Ok(())
+    }
+
+    async fn apply(&mut self, effect: Effect) -> Result<(), CoreError> {
+        let (to, message) = match effect {
+            Effect::Send { to, message } => (to, Message::Input(message)),
+            Effect::Switch {
+                to,
+                cursor_position,
+            } => {
+                tracing::info!(?to, ?cursor_position, "switching active input target");
+                (
+                    to,
+                    Message::Control(ControlMessage::SwitchActive {
+                        device_id: to,
+                        cursor_position,
+                    }),
+                )
+            }
+        };
+
+        let stream = match &message {
+            Message::Control(_) => self
+                .peers
+                .get_mut(&to)
+                .map(|peer| &mut peer.streams.control),
+            _ => self.peers.get_mut(&to).map(|peer| &mut peer.streams.input),
+        };
+        let Some(stream) = stream else {
+            return Err(CoreError::UnknownPeer(to));
+        };
+
+        match stream.send(&message).await {
+            Ok(()) => Ok(()),
+            Err(NetError::ConnectionClosed) => {
+                self.remove_peer(to);
+                Ok(())
+            }
+            Err(e) => {
+                self.remove_peer(to);
+                Err(CoreError::Net(e))
+            }
+        }
+    }
+}
+
+/// Runs on the target side: waits for the `SwitchActive` naming this
+/// device, warps the local cursor to the position it carries via
+/// `geometry`, then injects every `Input` message that follows on
+/// `peer`'s input stream — reusing `inject_from_peer` verbatim, since a
+/// target needs nothing beyond "place the cursor, then inject whatever
+/// arrives."
+pub async fn become_target(
+    peer: &mut Peer,
+    geometry: &mut dyn PointerGeometry,
+    inject: &mut dyn Inject,
+) -> Result<(), CoreError> {
+    match peer.recv_control().await? {
+        ControlMessage::SwitchActive {
+            cursor_position: (x, y),
+            ..
+        } => {
+            geometry.set_cursor_position(x, y)?;
+        }
+        other => {
+            return Err(CoreError::Net(NetError::ProtocolViolation(format!(
+                "expected a SwitchActive control message, got {other:?}"
+            ))));
+        }
+    }
+    inject_from_peer(inject, &mut peer.streams.input).await
+}

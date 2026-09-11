@@ -42,8 +42,15 @@ fn arb_control() -> impl Strategy<Value = Message> {
     prop_oneof![
         any::<u64>().prop_map(|nonce| Message::Control(ControlMessage::Ping { nonce })),
         any::<u64>().prop_map(|nonce| Message::Control(ControlMessage::Pong { nonce })),
-        arb_device_id()
-            .prop_map(|device_id| Message::Control(ControlMessage::SwitchActive { device_id })),
+        (arb_device_id(), any::<i32>(), any::<i32>()).prop_map(|(device_id, x, y)| {
+            Message::Control(ControlMessage::SwitchActive {
+                device_id,
+                cursor_position: (x, y),
+            })
+        }),
+        (any::<u32>(), any::<u32>()).prop_map(|(width, height)| {
+            Message::Control(ControlMessage::ScreenInfo { width, height })
+        }),
         ".*".prop_map(|reason| Message::Control(ControlMessage::Disconnect { reason })),
     ]
 }

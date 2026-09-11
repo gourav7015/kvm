@@ -24,11 +24,11 @@ use crate::error::CoreError;
 /// non-macOS target so this module stays platform-complete rather than
 /// only covering the two backends that currently exist.
 #[cfg(target_os = "macos")]
-const LOCAL_PLATFORM: PlatformKind = PlatformKind::MacOs;
+pub(crate) const LOCAL_PLATFORM: PlatformKind = PlatformKind::MacOs;
 #[cfg(windows)]
-const LOCAL_PLATFORM: PlatformKind = PlatformKind::Windows;
+pub(crate) const LOCAL_PLATFORM: PlatformKind = PlatformKind::Windows;
 #[cfg(all(unix, not(target_os = "macos")))]
-const LOCAL_PLATFORM: PlatformKind = PlatformKind::Linux;
+pub(crate) const LOCAL_PLATFORM: PlatformKind = PlatformKind::Linux;
 
 /// Applies modifier-role translation (Cmd<->Ctrl when exactly one side is
 /// macOS, everything else unchanged) to a `Key` event before it's

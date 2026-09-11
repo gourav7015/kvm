@@ -8,6 +8,8 @@ mod layout;
 mod ownership;
 mod pairing;
 mod pairing_session;
+mod router;
+mod session;
 
 pub use error::CoreError;
 pub use input_bridge::{forward_capture_to_peer, inject_from_peer};
@@ -18,3 +20,5 @@ pub use ownership::{
 };
 pub use pairing::{PairingError, PairingEvent, PairingState, transition};
 pub use pairing_session::{commit_if_completed, run_acceptor, run_initiator};
+pub use router::{Effect, Router};
+pub use session::{Session, become_target};

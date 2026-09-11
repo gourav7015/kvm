@@ -525,6 +525,63 @@ open until a clean real-hardware retest confirms both original
 symptoms (local-input leak, Windows pointer range) are gone *and* that
 this fresh regression (chaotic Windows-side movement) is gone too.
 
+### 12. A single restore path was not enough: `remove_peer` now restores suppression itself, plus a proactive watchdog
+
+**Update (2026-09-12):** the disconnect-safety bug fixed above (decision
+11's Update) was real, but the user's report of its actual impact was
+worse than "an error surfaced" — with both keyboard and trackpad
+suppressed and stuck, they had no way to reach Activity Monitor or a
+terminal to even kill the process, and had to power-cycle the machine.
+That is a fundamentally different severity than "a bug that gets fixed
+in the next commit": *any* future bug in the one restore path (however
+unlikely) would reproduce the exact same "locked out of your own
+computer" failure, because the two things a person would normally use
+to recover — the keyboard and the pointer — are precisely what's
+suppressed. A single, cleverly-placed restore call is not an adequate
+safety model for that failure class; redundancy is.
+
+Two changes, both defensive, neither replacing the other:
+
+1. **`Session::remove_peer` now restores suppression itself** (`crates/core/src/session.rs`),
+   rather than relying solely on the caller (`handle_captured`) to
+   compute a before/after comparison around it. Every code path that
+   can force a `Forwarding` -> `Local` transition due to a peer going
+   away — a captured event's send failing, or the new watchdog below —
+   goes through this one function, so it's now the single place
+   guaranteed to lift suppression whenever it fires, independent of
+   how it was triggered. `handle_captured`'s own before/after check
+   still runs too (for the ordinary edge-crossing-triggered case, which
+   never touches `remove_peer` at all) — the two paths overlap
+   harmlessly on the disconnect case (suppression gets "lifted" twice,
+   which is idempotent) rather than leaving a gap between them.
+
+2. **A proactive watchdog** (`crates/core/examples/edge_switch_relay.rs`):
+   every other recovery path in this codebase — including the fix
+   above — is *lazy*, triggered only as a side effect of the next
+   captured input event failing to send. That has a real
+   hardware-confirmed hole: if suppression has already left the user's
+   keyboard and mouse unresponsive, no further captured event will
+   *ever* arrive to trigger that lazy check — the failure disables the
+   only thing that could report it. `Session::active_target_connection_closed`
+   polls whether the transport has already reported the current
+   target's connection closed (`quinn::Connection::close_reason`),
+   with no send attempt needed, on the same 300ms tick already driving
+   the ground-truth diagnostic sampler. If closed, it proactively calls
+   `remove_peer` — forcing local input back with *zero* user action
+   required. Combined with quinn's own ~10s idle timeout
+   (`crates/net/src/config.rs`), this is a hard, bounded upper limit on
+   how long local input can ever stay suppressed after a real
+   disconnect, regardless of whether the user can interact with
+   anything at all in the meantime.
+
+New regression tests (both real, closed loopback `Peer` connections,
+not fakes): `remove_peer` restoring suppression is asserted directly in
+the existing `disconnect_then_reconnect_recovers_ownership_without_restarting_the_session`
+test; `active_target_connection_closed_detects_a_closed_connection_with_no_send_attempt`
+confirms the watchdog's detection works with no send ever attempted —
+the exact scenario ("no further input will ever be captured to notice")
+this decision exists to cover.
+
 ## Consequences
 
 - `crates/core` gains `layout.rs`, `ownership.rs`, `router.rs`,
@@ -534,7 +591,7 @@ this fresh regression (chaotic Windows-side movement) is gone too.
   one new `ControlMessage` variant.
 - Automated coverage: 54 unit tests in `kvm-core` (`layout`/`ownership`/
   `router`, all pure, no I/O, including a dead-edge clamp-to-the-exact-
-  boundary regression) plus 11 real-loopback-`Peer` integration tests
+  boundary regression) plus 12 real-loopback-`Peer` integration tests
   in `crates/core/tests/session_end_to_end.rs` covering edge
   crossing + cursor warp, screen-size exchange, an unregistered device
   never becoming a target, disconnect/reconnect without restarting the

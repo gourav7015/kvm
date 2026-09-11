@@ -452,11 +452,17 @@ async fn disconnect_then_reconnect_recovers_ownership_without_restarting_the_ses
     // Simulate a connection-health monitor noticing B is gone (dropping
     // its Peer ends the connection).
     drop(peer_b_first);
-    session.remove_peer(b.device_id);
+    session.remove_peer(b.device_id, &mut local_capture);
     assert_eq!(
         session.ownership_state(),
         OwnershipState::Local,
         "a disconnected target must fall back to local input immediately"
+    );
+    assert_eq!(
+        local_capture.suppression_calls,
+        vec![true, false],
+        "remove_peer itself must restore local input suppression -- not left \
+         to a caller that might never get another captured event to notice"
     );
     session.resync_local_position(500, 400);
 
@@ -990,9 +996,72 @@ async fn suppression_is_restored_even_when_the_disconnect_send_returns_a_generic
     // ...and, the actual point of this test, local input suppression
     // must have been lifted too -- not left stuck because apply()
     // returned an error before the old code ever reached this check.
+    // Both `remove_peer` (directly) and `handle_captured`'s own
+    // before/after check independently try to restore it -- a
+    // deliberate belt-and-suspenders after the real-hardware finding
+    // that a *single* restore path is one bug away from leaving a user
+    // with no keyboard or trackpad and no way to even reach a terminal
+    // to recover -- so the exact call count isn't asserted, only that
+    // it was engaged once and is left lifted.
     assert_eq!(
-        local_capture.suppression_calls,
-        vec![true, false],
-        "suppression must be restored even though the disconnect surfaced as an error"
+        local_capture.suppression_calls.first(),
+        Some(&true),
+        "suppression must have engaged when forwarding began"
+    );
+    assert_eq!(
+        local_capture.suppression_calls.last(),
+        Some(&false),
+        "suppression must end up lifted even though the disconnect surfaced as an error"
+    );
+}
+
+#[tokio::test]
+async fn active_target_connection_closed_detects_a_closed_connection_with_no_send_attempt() {
+    // Regression test for the watchdog in edge_switch_relay.rs (see
+    // ADR-0009's Update): this must be detectable *without* ever
+    // attempting a send, since the whole point is proactively noticing
+    // a dead connection even if the user's local input is stuck and no
+    // further captured event will ever arrive to trigger the lazy
+    // (send-failure-triggered) recovery path.
+    let a = Device::new([31u8; 32]);
+    let b = Device::new([32u8; 32]);
+    let (peer_a, _peer_b) = connect_pair(&a, &b).await;
+    let connection_handle = peer_a.connection.clone();
+
+    let layout = two_device_layout(a.device_id, b.device_id);
+    let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
+    session.add_peer(b.device_id, peer_a, (1000, 800));
+    let mut local_geometry = FakeGeometry::new((500, 400));
+    let mut local_capture = FakeCapture::default();
+
+    // Not yet Forwarding: nothing to detect.
+    assert_eq!(session.active_target_connection_closed(), None);
+
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.ownership_state(),
+        OwnershipState::Forwarding { target, .. } if target == b.device_id
+    ));
+
+    // Forwarding, but the connection is still alive: nothing to detect.
+    assert_eq!(session.active_target_connection_closed(), None);
+
+    // Close it without ever attempting a send -- no InputMessage
+    // reaches handle_captured at all here.
+    connection_handle.close(0u32.into(), b"simulated abrupt disconnect");
+    // Give the connection driver a moment to observe the local close.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert_eq!(
+        session.active_target_connection_closed(),
+        Some(b.device_id),
+        "a closed connection to the active target must be detectable with no send attempt"
     );
 }

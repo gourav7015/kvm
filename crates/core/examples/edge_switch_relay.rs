@@ -220,25 +220,57 @@ mod real {
         });
 
         let mut last_state = session.ownership_state();
-        // TEMPORARY diagnostic instrument (Bug 9 root-cause hunt): reads
-        // the OS's own reported cursor position on a fixed cadence,
-        // completely independent of the capture tap's own event stream
-        // -- this is the direct, "ground truth" check for whether
-        // suppression is actually freezing the visible cursor, rather
-        // than inferring it from a code path having executed. Only
-        // logged while genuinely useful (Forwarding), so a normal
-        // session isn't flooded.
-        let mut ground_truth = tokio::time::interval(std::time::Duration::from_millis(300));
+        // Runs on a fixed cadence regardless of captured input, for two
+        // reasons:
+        //
+        // 1. Diagnostic ground truth: reads the OS's own reported
+        //    cursor position, completely independent of the capture
+        //    tap's own event stream -- the direct check for whether
+        //    suppression is actually freezing the visible cursor,
+        //    rather than inferring it from a code path having
+        //    executed.
+        //
+        // 2. **Safety watchdog** (see ADR-0009's Update): every other
+        //    disconnect-recovery path in this codebase is *lazy* --
+        //    triggered only as a side effect of the next captured input
+        //    event failing to send. That has a real hardware-confirmed
+        //    hole: if the user has stopped moving the mouse/keyboard
+        //    entirely (exactly the state a stuck suppression leaves
+        //    them in -- keyboard and trackpad both unresponsive, no way
+        //    to even reach a terminal to kill this process), nothing
+        //    ever triggers that lazy check, and local input stays
+        //    suppressed indefinitely. This tick proactively polls
+        //    whether the transport has already noticed the current
+        //    target's connection is closed, and if so forces local
+        //    input back immediately -- with zero user action required.
+        //    Combined with quinn's own ~10s idle timeout (see
+        //    `crates/net/src/config.rs`), this is a hard upper bound on
+        //    how long local input can ever stay suppressed after a
+        //    real disconnect, independent of whether the user can
+        //    interact with anything at all.
+        let mut watchdog = tokio::time::interval(std::time::Duration::from_millis(300));
         loop {
             tokio::select! {
-                _ = ground_truth.tick() => {
-                    if !matches!(session.ownership_state(), OwnershipState::Local)
-                        && let Ok(pos) = geometry.cursor_position()
+                _ = watchdog.tick() => {
+                    if let Some(pos) = (!matches!(session.ownership_state(), OwnershipState::Local))
+                        .then(|| geometry.cursor_position().ok())
+                        .flatten()
                     {
                         println!(
                             "ground-truth check: real OS cursor position while {:?} is {pos:?}",
                             session.ownership_state()
                         );
+                    }
+                    if let Some(target) = session.active_target_connection_closed() {
+                        println!(
+                            "watchdog: {target:?}'s connection is already closed -- forcing \
+                             local input back now, with no captured event needed to notice"
+                        );
+                        session.remove_peer(target, &mut capture);
+                        if let Ok(pos) = geometry.cursor_position() {
+                            session.resync_local_position(pos.0, pos.1);
+                        }
+                        last_state = session.ownership_state();
                     }
                 }
                 event = async_rx.recv() => {

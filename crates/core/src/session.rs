@@ -91,7 +91,22 @@ impl Session {
     /// forwarding target, ownership snaps back to `Local` immediately —
     /// see ADR-0009: a disconnected target must never keep holding
     /// ownership, freeze the pointer, or drop keyboard input.
-    pub fn remove_peer(&mut self, device_id: DeviceId) {
+    ///
+    /// **Also restores local input suppression itself, right here** —
+    /// not left to the caller to notice. A real-hardware safety finding
+    /// (see ADR-0009's Update): the previous design only restored
+    /// suppression inside `handle_captured`, computed by comparing
+    /// ownership state before/after that one call. Any *other* path
+    /// that can force a disconnect back to `Local` (this method, called
+    /// directly, or a proactive watchdog with no captured event driving
+    /// it at all -- see `edge_switch_relay.rs`) would leave suppression
+    /// stuck with no further captured input ever able to clear it,
+    /// which is exactly the failure mode real hardware QA hit: local
+    /// keyboard and trackpad both suppressed, with no way left to even
+    /// reach Activity Monitor to kill the process. Centralizing the
+    /// restore here means every path that can force `Forwarding` ->
+    /// `Local` goes through one place that's guaranteed to lift it.
+    pub fn remove_peer(&mut self, device_id: DeviceId, local_capture: &mut dyn Capture) {
         let was_active_target = matches!(
             self.router.state(),
             OwnershipState::Forwarding { target, .. } if target == device_id
@@ -103,9 +118,33 @@ impl Session {
                 ?device_id,
                 "active forwarding target disconnected, falling back to local input"
             );
+            local_capture.set_local_suppression(false);
         } else {
             tracing::info!(?device_id, "peer disconnected");
         }
+    }
+
+    /// Checks whether the *current* forwarding target's underlying
+    /// connection has already been reported closed by the transport
+    /// (`quinn::Connection::close_reason`), without needing to attempt
+    /// a send first. Returns the target's `DeviceId` if so.
+    ///
+    /// This is what makes the watchdog in `edge_switch_relay.rs`
+    /// proactive rather than lazy: without it, a dead connection is
+    /// only ever discovered as a *side effect* of the next captured
+    /// input event failing to send -- which never happens if the user
+    /// has stopped moving the mouse/keyboard entirely (exactly the
+    /// state a stuck suppression leaves them in). Polling this
+    /// independently of any captured event closes that gap: local
+    /// input gets restored within one watchdog tick of the transport
+    /// itself noticing the connection is gone, with no user action
+    /// required at all.
+    pub fn active_target_connection_closed(&self) -> Option<DeviceId> {
+        let OwnershipState::Forwarding { target, .. } = self.router.state() else {
+            return None;
+        };
+        let peer = self.peers.get(&target)?;
+        peer.connection.close_reason().is_some().then_some(target)
     }
 
     /// Re-anchors the router's tracked cursor position to a real OS
@@ -167,7 +206,7 @@ impl Session {
         let was_local = matches!(self.router.state(), OwnershipState::Local);
         let mut first_error = None;
         for effect in self.router.handle_captured(event) {
-            if let Err(e) = self.apply(effect, local_geometry).await {
+            if let Err(e) = self.apply(effect, local_geometry, local_capture).await {
                 first_error.get_or_insert(e);
             }
         }
@@ -187,6 +226,7 @@ impl Session {
         &mut self,
         effect: Effect,
         local_geometry: &mut dyn PointerGeometry,
+        local_capture: &mut dyn Capture,
     ) -> Result<(), CoreError> {
         let (to, message) = match effect {
             Effect::RecenterLocal { x, y } => {
@@ -231,12 +271,12 @@ impl Session {
             }
             Err(NetError::ConnectionClosed) => {
                 tracing::warn!(?to, "send failed: connection closed");
-                self.remove_peer(to);
+                self.remove_peer(to, local_capture);
                 Ok(())
             }
             Err(e) => {
                 tracing::warn!(?to, error = %e, "send failed");
-                self.remove_peer(to);
+                self.remove_peer(to, local_capture);
                 Err(CoreError::Net(e))
             }
         }

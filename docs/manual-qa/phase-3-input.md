@@ -71,24 +71,39 @@ listener's log, matching real physical key presses on the Mac.
 | Left click | PASS |
 | Right click | PASS |
 | Middle click | PASS (trackpad three-finger/middle-click gesture registered) |
-| Shift / Control / Option / Command alone | **FAIL** — see below |
+| Shift / Control / Option / Command alone | **PASS** (after a fix — see below) |
 | Unmapped/punctuation keys (e.g. period) | PASS (correctly `Key::Unknown(code)`, not dropped or misrepresented) |
 
-**Bare modifier keys (Shift, Control, Option, Command) produce no event
-at all when pressed alone on the Mac.** Root cause confirmed both by
-code inspection and by this hardware run: macOS's `CGEventTap` reports a
-bare modifier transition as `CGEventType::FlagsChanged`, and
-`macos/events.rs` explicitly returns `None` for that event type (a
-decision already documented in ADR-0007/the code comment as
-"deliberately deferred", not an oversight). Practical impact confirmed
-here is broader than just bare taps: since `InputMessage::Key` carries
-no "concurrently held modifiers" field, a real Mac-side shortcut like
-Cmd+C only ever sends a plain `Key::C` — the Command press itself is
-silently absent from the wire. **This is a real, hardware-confirmed
-limitation of the current Phase 3 scope**, not fixed during this QA
-session per the "no feature expansion during QA" instruction — a proper
-fix needs stateful flags-diffing and likely a protocol change, which is
-real design/implementation work for a follow-up, not a QA-session patch.
+**Bare modifier keys initially produced no event at all when pressed
+alone on the Mac** — confirmed both by code inspection and by this
+hardware run. Root cause: macOS's `CGEventTap` reports a bare modifier
+transition as `CGEventType::FlagsChanged`, and `macos/events.rs`
+originally returned `None` for that event type unconditionally
+(previously documented as "deliberately deferred").
+
+**Fixed during this QA session** (commit `0c75c78`, ADR-0007's second
+Update note): `macos/events.rs` now diffs the modifier flags immediately
+before and after a `FlagsChanged` event against the specific category
+bit for the key its own keycode identifies, reporting a press/release
+only when that bit actually flipped. Retested on real hardware —
+pressing bare Command produced:
+
+```
+received Key { key: MetaLeft, state: Pressed, repeat: false, source_os: MacOs } -> translated+injected Key { key: ControlLeft, state: Pressed, repeat: false, source_os: MacOs } in 629.6µs
+received Key { key: MetaLeft, state: Released, repeat: false, source_os: MacOs } -> translated+injected Key { key: ControlLeft, state: Released, repeat: false, source_os: MacOs } in 438.9µs
+```
+
+Command is now captured and correctly translated to Control on
+injection. Two things remain deliberately out of scope, not silently
+mishandled: holding both keys of one modifier category (e.g. both Shift
+keys) and releasing one — `CGEventFlags` has one bit per category, not
+per key, so that can't be told apart from "nothing changed" and is
+reported as no event rather than guessed at; and Caps Lock, whose flag
+is a toggle rather than a held-state. Also still open: `InputMessage::Key`
+carries no "concurrently held modifiers" field, so a real Mac-side
+combo like Cmd+C still sends only a plain `Key::C` — the standalone tap
+is fixed, but a shortcut *combination* still doesn't carry modifier
+info. That remains a separate, not-yet-scoped piece of work.
 
 ### Round 2 — Windows capture → Mac inject
 
@@ -122,10 +137,10 @@ received Key { key: ControlLeft, state: Released, repeat: false, source_os: Wind
 A physical Ctrl+A press on the Windows keyboard was captured as
 `ControlLeft`, sent over the real QUIC connection, translated to
 `MetaLeft`, and injected — executing as Cmd+A on the Mac. This is the
-actual killer feature, confirmed working end-to-end on real hardware in
-the direction that's actually testable (see Round 1's FlagsChanged note
-for why the reverse direction can't currently exercise a bare-modifier
-press at all).
+actual killer feature, confirmed working end-to-end on real hardware.
+The reverse direction (Command on Mac → Control on Windows) was
+initially blocked by the FlagsChanged gap above; after that fix, it's
+confirmed working too (see Round 1).
 
 **Bug found and fixed during this QA session** (see `docs/adr/0007-input-architecture.md`'s Update note and commit `8266c24`):
 `translate_for_target` was fully implemented and unit-tested but never
@@ -137,7 +152,7 @@ sites; regression test added at `core`'s layer
 (`peer_key_events_are_translated_for_this_builds_platform`).
 
 - [x] Letters, digits land correctly, both directions
-- [x] **Command (Mac) → Control (Windows)**: not exercisable — Mac never captures a bare Command press (FlagsChanged gap, see above). Confirmed **FAIL** for this specific direction, root cause identified.
+- [x] **Command (Mac) → Control (Windows)**: **PASS** after the FlagsChanged fix, confirmed with reproducible log evidence in Round 1
 - [x] **Control (Windows) → Command (Mac)**: **PASS**, confirmed with reproducible log evidence above
 - [x] Option (Mac) / Alt (Windows): PASS, correctly never swapped
 - [x] Function keys, arrows, Enter/Escape/Backspace/Tab/Space: PASS both directions
@@ -145,18 +160,25 @@ sites; regression test added at `core`'s layer
 
 ## 4. Windows UAC / elevated-window behavior
 
-**NOT TESTED under the intended conditions.** The Windows terminal used
-throughout this session's testing ran elevated ("Administrator: ..." in
-the title bar) — an elevated process is not subject to the UIPI
-restriction ADR-0007 §5 documents (that restriction only blocks a
-*lower*-integrity process from injecting into a *higher*-integrity
-window; an elevated injector can target anything). So this test's real
-precondition — the relay running unelevated, target window elevated —
-was never actually in effect. Needs re-running with a standard
-(non-administrator) terminal running the relay, targeting a
-"Run as administrator" window, to genuinely exercise this path.
+**OPEN — cannot be tested on this specific machine/account.** Every
+Command Prompt window on this Windows machine shows "Administrator:" in
+its title bar regardless of how it's launched — including one opened
+with no "Run as administrator" request at all. This means the logged-in
+account is the Windows **built-in Administrator account**, which is
+specifically exempt from UAC's Admin Approval Mode / split-token model:
+every process this account runs already carries the full administrator
+token, with no unelevated state to compare against. The intended
+test — an unelevated relay process failing to inject into a genuinely
+higher-integrity window — has no unelevated context available to set up
+on this machine at all. This is a property of the test environment, not
+something more attempts would resolve.
 
-- [ ] OPEN: needs a real run with an unelevated relay process
+To actually close this item, the relay needs to run under a **standard
+(non-built-in-Administrator) user account** with UAC's Admin Approval
+Mode active, on a different machine or account than the one used for
+this QA session.
+
+- [ ] OPEN: needs a standard user account with UAC active; not available on this session's Windows machine
 
 ## 5. End-to-end latency
 

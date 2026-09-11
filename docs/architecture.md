@@ -120,15 +120,25 @@ channels. Platform-specific code is confined to backend modules inside
   at the crate level — a future `core` device list will need to do that.
 
 - Phase 3 (input engine, macOS↔Windows target pair) — **🟡 real
-  Mac↔Windows hardware QA completed 2026-09-10/11; almost everything
-  passed, but this phase is not closed** — Windows UAC/elevated-window
-  behavior still needs a genuine (unelevated-relay) re-run, and Mac→
-  Windows Command→Control translation is a confirmed, structural FAIL
-  (macOS drops bare modifier presses at capture time — see
-  `docs/manual-qa/phase-3-input.md`). One real bug (translation logic
-  correct but never wired into the live inject path) was found and fixed
-  during this QA pass — commit `8266c24`. `protocol` gained a normalized
-  `Key`/`PlatformKind`
+  Mac↔Windows hardware QA completed 2026-09-10/11; both translation
+  directions now confirmed working, but this phase is not closed** —
+  Windows UAC/elevated-window behavior remains untestable on this
+  session's Windows machine specifically (its logged-in account is the
+  built-in Administrator account, which is exempt from UAC's
+  split-token model entirely — there's no unelevated state available on
+  it to test against; needs a standard user account elsewhere). Two real
+  issues were found and fixed during this QA pass: (1) `commit 8266c24`
+  — `translate_for_target` was correct and unit-tested but never wired
+  into the live inject path; (2) `commit 0c75c78` — macOS never captured
+  a bare modifier key press at all (reported as `FlagsChanged`, which
+  the capture backend dropped unconditionally), blocking Mac→Windows
+  Command→Control translation; fixed by diffing modifier flags across
+  events, confirmed on real hardware (`docs/manual-qa/phase-3-input.md`).
+  Still open beyond the UAC item: `InputMessage::Key` carries no
+  concurrently-held-modifiers field, so a real shortcut *combination*
+  like Cmd+C still sends only the plain letter — the standalone tap fix
+  doesn't cover that, and it's separate, not-yet-scoped work. `protocol`
+  gained a normalized `Key`/`PlatformKind`
   instead of a raw OS keycode; `input` gained the `Capture`/`Inject`
   trait boundary, a pure OS-independent modifier-translation function
   (the killer feature: Command↔Control swap only when exactly one side
@@ -163,24 +173,27 @@ channels. Platform-specific code is confined to backend modules inside
 
 ### Manual QA record — Phase 3 (real Mac↔Windows run 2026-09-10/11)
 
-Full detail and evidence: `docs/manual-qa/phase-3-input.md`. One real
-bug was found and fixed during this run (see
-[ADR-0007](adr/0007-input-architecture.md)'s Update note and commit
-`8266c24`): `translate_for_target` was correct and unit-tested but never
-actually wired into the live inject path.
+Full detail and evidence: `docs/manual-qa/phase-3-input.md`. Two real
+issues were found and fixed during this run (see
+[ADR-0007](adr/0007-input-architecture.md)'s Update notes):
+`translate_for_target` (commit `8266c24`) was correct and unit-tested
+but never actually wired into the live inject path; and macOS never
+captured a bare modifier key press at all (commit `0c75c78`), blocking
+Mac→Windows translation until fixed.
 
 | Item | Status |
 |---|---|
 | macOS Accessibility-permission-missing path (clear error, no panic, no silent no-op) | ✅ PASS — verified 2026-09-10/11, real `PermissionDenied` before grant, real success after |
-| macOS keyboard capture/injection (letters, digits, Enter/Tab/Backspace/Escape/Space, arrows, F1–F5) | ✅ PASS |
+| macOS keyboard capture/injection (letters, digits, Enter/Tab/Backspace/Escape/Space, arrows, F1–F5, bare modifiers after the fix) | ✅ PASS |
 | macOS mouse capture/injection (move, left/right/middle click, scroll) | ✅ PASS |
 | Windows keyboard capture/injection (letters, digits, Enter/Tab/Backspace/Escape/Space, arrows, F1–F5, all modifiers) | ✅ PASS |
 | Windows mouse capture/injection (move, left/right/middle click, scroll) | ✅ PASS |
-| Windows UAC/elevated-window behavior | ⬜ OPEN — session's terminal ran elevated throughout, so the real (unelevated-relay-vs-elevated-target) precondition was never in effect; needs a re-run with a standard terminal |
+| Windows UAC/elevated-window behavior | ⬜ OPEN — this session's Windows machine is logged in as the built-in Administrator account (exempt from UAC's split-token model), so there is no unelevated state to test against on it at all; needs a standard user account with UAC active |
 | **Control (Windows) → Command (Mac) translation** | ✅ PASS — confirmed with reproducible log evidence (real Ctrl+A on Windows executed as Cmd+A on the Mac) |
-| **Command (Mac) → Control (Windows) translation** | ❌ FAIL — structurally not exercisable: macOS reports bare modifier presses as `FlagsChanged`, which the capture backend deliberately drops (documented, pre-existing scope decision, not a new bug); a real Mac-side Cmd+C currently sends only a plain `C` with no modifier info at all |
+| **Command (Mac) → Control (Windows) translation** | ✅ PASS (after the `FlagsChanged` fix) — confirmed with reproducible log evidence (real bare Command press on the Mac captured, translated to `ControlLeft`, and injected on Windows) |
 | Option↔Alt never translates | ✅ PASS, both directions |
 | End-to-end input latency measured and logged (`examples/input_relay.rs`) | ✅ PASS — network RTT 7.9–15.0ms, injection calls ~70–700µs typical (Mac CGEvent and Windows SendInput both), felt latency acceptable for interactive use |
+| Modifier state on a shortcut *combination* (e.g. does Cmd+C carry "Command held" alongside `C`) | ⬜ OPEN — not part of this fix; `InputMessage::Key` still has no concurrent-modifiers field, separate not-yet-scoped work |
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
 phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

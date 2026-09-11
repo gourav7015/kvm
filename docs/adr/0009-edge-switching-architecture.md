@@ -582,6 +582,69 @@ confirms the watchdog's detection works with no send ever attempted —
 the exact scenario ("no further input will ever be captured to notice")
 this decision exists to cover.
 
+### 13. A second attempt at active correction — this time using the codebase's own proven warp technique
+
+**Update (2026-09-12):** a clean real-hardware retest of decision 11/12's
+fixes (chaotic cursor reverted, disconnect safety hardened) reported no
+crash and no stuck input — the watchdog and centralized restore held up
+— but the *original* two symptoms from decision 9 were still present:
+the Mac cursor still visibly moved while forwarding, and the Windows
+cursor range still felt wrong. This directly contradicts decision 9's
+ground-truth measurement (135 samples, frozen throughout three live
+sessions) showing disassociation alone should be sufficient — an
+unresolved discrepancy between direct measurement and direct human
+observation that this ADR does not claim to fully explain. A plausible
+candidate, not confirmed: `CGAssociateMouseAndMouseCursorPosition`'s
+behavior is long-documented as historically inconsistent across macOS
+releases and input paths, and this project is running on a very recent
+release (26.6.2) with a trackpad specifically, not a USB mouse — the
+exact combination least likely to match whatever behavior the original
+API was validated against decades ago.
+
+Rather than trust the measurement over the observation (or vice versa),
+a second active-correction layer was added — but built entirely
+differently from decision 11's reverted attempt, specifically to avoid
+repeating its failure mode. Decision 11 used `CGWarpMouseCursorPosition`,
+an API used nowhere else in this codebase, on the strength of its
+documented "generates no event" claim — real hardware evidence pointed
+at that claim not holding, feeding spurious corrective deltas into the
+capture pipeline and forwarding them to the target as real input. This
+attempt instead reuses the *exact* `CGEventPost` + `SYNTHETIC_EVENT_MARKER`
+pattern already proven correct for `RecenterLocal` and the target-side
+`SwitchActive` warp (decision 5): post an absolute `MouseMoved` event to
+`anchor` (the position captured the instant suppression began), tagged
+as synthetic. Two things make this safe against the specific way the
+previous attempt failed:
+
+- The resulting event *is expected* to arrive back at the same tap
+  (`CGEventPost` always delivers to every tap watching, including the
+  one that posted it) — nothing here assumes otherwise, unlike the
+  previous attempt's reliance on "generates no event."
+- That echo is recognized via the marker and explicitly excluded both
+  from re-triggering another correction (breaking the feedback loop at
+  its source, since `is_our_own_synthetic_event` is checked before
+  deciding whether to warp) and from ever becoming a captured
+  `InputMessage` (`to_input_message` already filters synthetic events
+  for every caller, a decision-5 guarantee this doesn't need to
+  re-implement). So even firing on every single suppressed move, it
+  cannot leak a spurious delta to whatever device is being forwarded
+  to — the exact channel the previous attempt's failure traveled
+  through.
+
+`is_our_own_synthetic_event` (`crates/input/src/macos/events.rs`) and
+`event_source` (`crates/input/src/macos/inject.rs`) both changed from
+private to `pub(crate)` so `capture.rs` could reuse them rather than
+duplicating the check/construction logic — the only two-line surface
+change to already-existing, already-tested code. `last_position` moved
+from a thread-local `Cell` back to an `Arc<Mutex<..>>` field (as it
+briefly was in decision 11), since `set_local_suppression` — called
+from a different thread — needs to read it to seed `anchor`.
+
+**Not independently unit-testable**, same category as every other
+real-OS-interaction fix in this ADR — verified by real-hardware retest,
+which this decision does not yet have. Phase 4 remains open until it
+does.
+
 ## Consequences
 
 - `crates/core` gains `layout.rs`, `ownership.rs`, `router.rs`,

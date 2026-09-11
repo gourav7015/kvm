@@ -30,7 +30,7 @@ pub(crate) const SYNTHETIC_EVENT_MARKER: i64 = 0x004B_564D_5741_5250;
 /// Whether a captured `CGEvent` was posted by this same process (via
 /// [`SYNTHETIC_EVENT_MARKER`]) rather than originating from real
 /// hardware.
-fn is_our_own_synthetic_event(event: &CGEvent) -> bool {
+pub(crate) fn is_our_own_synthetic_event(event: &CGEvent) -> bool {
     event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == SYNTHETIC_EVENT_MARKER
 }
 

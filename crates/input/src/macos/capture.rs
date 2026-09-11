@@ -3,20 +3,22 @@
 //! OS event loop — no cross-platform translation logic lives here.
 
 use std::cell::Cell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
-    CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
-    CGEventTapProxy, CGEventType, CallbackResult,
+    CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEventTapProxy, CGEventType, CGMouseButton, CallbackResult, EventField,
 };
+use core_graphics::geometry::CGPoint;
 
 use crate::error::InputError;
-use crate::macos::events::to_input_message;
+use crate::macos::events::{SYNTHETIC_EVENT_MARKER, is_our_own_synthetic_event, to_input_message};
+use crate::macos::inject::event_source;
 use crate::macos::permission::has_accessibility_permission;
 use crate::traits::Capture;
 
@@ -31,6 +33,24 @@ use crate::traits::Capture;
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGEventTapEnable(tap: CGEventTapProxy, enable: bool);
+}
+
+/// Posts a synthetic, absolute mouse-move `CGEvent` to `point`, tagged
+/// with [`SYNTHETIC_EVENT_MARKER`] so it's recognized as our own warp
+/// rather than real motion — the exact same posting technique
+/// `MacInject::set_cursor_position` already uses for `RecenterLocal`
+/// and the target-side `SwitchActive` warp, reused here instead of
+/// `CGWarpMouseCursorPosition` (see the struct doc for why).
+fn post_synthetic_warp(point: CGPoint) -> Result<(), InputError> {
+    let source = event_source()?;
+    let cg_event =
+        CGEvent::new_mouse_event(source, CGEventType::MouseMoved, point, CGMouseButton::Left)
+            .map_err(|()| {
+                InputError::InjectFailed("failed to create mouse-move CGEvent".to_string())
+            })?;
+    cg_event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, SYNTHETIC_EVENT_MARKER);
+    cg_event.post(CGEventTapLocation::HID);
+    Ok(())
 }
 
 /// Global, low-level capture of this machine's keyboard and mouse via a
@@ -49,42 +69,60 @@ unsafe extern "C" {
 /// disruptive, not merely cosmetic, so this backend now suppresses
 /// local delivery for the duration of a `Forwarding` session.
 ///
-/// **Suppression is two real, separate mechanisms, not one** — a
-/// second real-hardware finding on top of the first: dropping the
-/// `CGEvent` (via the tap callback returning `CallbackResult::Drop`)
-/// stops *event delivery* to other apps, which is sufficient for
-/// keyboard input, but does **not** stop the WindowServer's own cursor
-/// position from tracking raw HID mouse motion — that tracking runs
-/// independently of whatever any single event tap decides to do with
-/// the resulting `CGEvent`. Actually freezing the visible cursor needs
-/// [`CGDisplay::associate_mouse_and_mouse_cursor_position`] set to
-/// `false`, the same API used for exactly this purpose by tools that
-/// need raw relative mouse deltas without the OS cursor visibly moving
-/// (e.g. games reading "mouse look" input) — HID motion (and therefore
-/// this tap's own `MouseMoved` events) keeps flowing normally while
-/// disassociated, so forwarding is unaffected; only the local cursor's
-/// on-screen position stops updating.
+/// **Suppression is three real, layered mechanisms** — real hardware
+/// QA repeatedly disagreed with what a single mechanism should have
+/// produced, so each layer is independently real, not decorative:
 ///
-/// **A third, "active re-warp" layer was tried and reverted** (see
-/// ADR-0009 decision 11's Update): it used `CGWarpMouseCursorPosition`
-/// to forcibly snap the cursor back to an anchor on every suppressed
-/// move, on the theory that disassociation alone might not be honored
-/// on every input path (trackpad vs. mouse). Real hardware QA
-/// afterward reported the *target* machine's cursor behaving
-/// "extremely out of control" — consistent with that warp not actually
-/// being the zero-event operation its documentation claims on this
-/// macOS version, feeding spurious corrective deltas into the exact
-/// same capture pipeline and forwarding them as if they were real
-/// input. Removed rather than patched further: the two mechanisms
-/// below were already directly verified sufficient by an independent
-/// ground-truth measurement (reading real OS cursor position on a
-/// fixed cadence across three live `Forwarding` sessions, frozen every
-/// time) before the third layer was ever added.
+/// 1. Dropping the `CGEvent` (`CallbackResult::Drop`) stops *event
+///    delivery* to other apps — sufficient for keyboard input.
+/// 2. [`CGDisplay::associate_mouse_and_mouse_cursor_position`] set to
+///    `false` is the documented way to stop the WindowServer's cursor
+///    position from tracking raw HID motion while still letting this
+///    tap's own `MouseMoved` events flow normally. Directly measured
+///    sufficient on its own in one real hardware round (135 samples of
+///    the OS's own reported cursor position, frozen throughout three
+///    live `Forwarding` sessions) — but a *later* round reported the
+///    cursor visibly moving again in the same shape of session, an
+///    unresolved discrepancy between measurement and observation this
+///    ADR does not fully explain (candidate: trackpad-driven cursor
+///    rendering not fully honoring the association toggle on every
+///    macOS version — see ADR-0009 decision 13's Update).
+/// 3. **Active correction, using the codebase's already-proven warp
+///    technique.** An earlier attempt at this (decision 11) used
+///    `CGWarpMouseCursorPosition`, untested elsewhere in this codebase,
+///    and real hardware QA found it made things *worse* (the target
+///    machine's cursor went "extremely out of control") — consistent
+///    with that API's "generates no event" documentation not holding
+///    on this macOS version, feeding spurious corrective deltas into
+///    the same capture pipeline and forwarding them as real input.
+///    This version instead reuses the exact `CGEventPost` +
+///    `SYNTHETIC_EVENT_MARKER` pattern already proven correct for
+///    `RecenterLocal` and the target-side `SwitchActive` warp: post an
+///    absolute move to `anchor` (the position when suppression began),
+///    tagged as synthetic. The resulting event *does* arrive back at
+///    this same tap (posting always does), but is recognized via the
+///    marker and explicitly excluded from re-triggering a further
+///    correction (breaking any feedback loop at the source) and from
+///    ever becoming a captured [`kvm_protocol::InputMessage`]
+///    (`to_input_message` already filters synthetic events for any
+///    caller) — so, unlike the reverted attempt, this mechanism cannot
+///    leak a spurious delta to whatever device is being forwarded to,
+///    even if it fires on every single suppressed move.
 #[derive(Default)]
 pub struct MacCapture {
     run_loop: Option<CFRunLoop>,
     thread: Option<thread::JoinHandle<()>>,
     suppress: Arc<AtomicBool>,
+    /// The most recently observed real cursor position. An
+    /// `Arc<Mutex<..>>` rather than the thread-local `Cell` a purely
+    /// listen-only tap would only ever need, because
+    /// `set_local_suppression` (called from a different thread) reads
+    /// it to seed `anchor`.
+    last_position: Arc<Mutex<Option<CGPoint>>>,
+    /// Set to `Some` the instant suppression begins (a snapshot of
+    /// `last_position` at that moment), cleared when it ends. `None`
+    /// while not suppressed.
+    anchor: Arc<Mutex<Option<CGPoint>>>,
 }
 
 impl MacCapture {
@@ -105,20 +143,24 @@ impl Capture for MacCapture {
 
         let (setup_tx, setup_rx) = mpsc::channel::<Result<CFRunLoop, String>>();
         let suppress = Arc::clone(&self.suppress);
+        let last_position = Arc::clone(&self.last_position);
+        let anchor = Arc::clone(&self.anchor);
+        // A fresh start() must never inherit a stale reading from a
+        // previous start()/stop() cycle.
+        *last_position.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *anchor.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
         let join_handle = thread::Builder::new()
             .name("kvm-input-macos-capture".to_string())
             .spawn(move || {
                 let events_of_interest = crate::macos::events::CAPTURED_EVENT_TYPES.to_vec();
                 // Fresh per capture session, so a stale modifier-held
-                // state (or a stale absolute cursor reading — see
-                // ADR-0009) from a previous start()/stop() cycle never
+                // state from a previous start()/stop() cycle never
                 // leaks into this one. A `Cell` rather than a plain
-                // local: `CGEventTap::new` requires an `Fn` callback, not
-                // `FnMut`, so the closure only ever touches this through
-                // a shared reference.
+                // local: `CGEventTap::new` requires an `Fn` callback,
+                // not `FnMut`, so the closure only ever touches this
+                // through a shared reference.
                 let last_flags = Cell::new(CGEventFlags::empty());
-                let last_position: Cell<Option<core_graphics::geometry::CGPoint>> = Cell::new(None);
 
                 let tap = CGEventTap::new(
                     CGEventTapLocation::HID,
@@ -160,11 +202,19 @@ impl Capture for MacCapture {
                             return CallbackResult::Keep;
                         }
                         let mut flags = last_flags.get();
-                        let mut position = last_position.get();
+                        // Locking on every event is fine at real input
+                        // rates; a poisoned lock (a panic while held,
+                        // which nothing here ever does) falls back to
+                        // the poisoned guard's data rather than losing
+                        // capture entirely.
+                        let mut position_guard =
+                            last_position.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut position = *position_guard;
                         let message =
                             to_input_message(event_type, event, &mut flags, &mut position);
                         last_flags.set(flags);
-                        last_position.set(position);
+                        *position_guard = position;
+                        drop(position_guard);
                         if let Some(message) = message {
                             // A full channel or a dropped receiver just
                             // means "no one is listening anymore" — not a
@@ -176,32 +226,53 @@ impl Capture for MacCapture {
                         // whether this machine's *own* OS also acts on
                         // it depends on `suppress` (ADR-0009 decision 9).
                         let suppressed = suppress.load(Ordering::Relaxed);
-                        // TEMPORARY diagnostic tracing (Bug 9 root-cause
-                        // hunt): direct, per-event runtime proof of (a)
-                        // whether the callback is actually observing this
-                        // event at all while forwarding, and (b) what
-                        // disposition it actually chose -- not merely
-                        // that the suppression code path was reached.
-                        // Restrict to the event kinds suppression cares
-                        // about so a normal Local session isn't flooded.
-                        if matches!(
+                        let is_mouse_motion = matches!(
                             event_type,
                             CGEventType::MouseMoved
                                 | CGEventType::LeftMouseDragged
                                 | CGEventType::RightMouseDragged
                                 | CGEventType::OtherMouseDragged
-                                | CGEventType::KeyDown
-                                | CGEventType::KeyUp
-                                | CGEventType::FlagsChanged
-                        ) {
+                        );
+                        // Our own corrective warp's echo, arriving back
+                        // at this same tap (posting always delivers to
+                        // every tap watching, including the one that
+                        // posted it) -- must not trigger yet another
+                        // correction, or this would feed back on itself
+                        // forever. See the struct doc.
+                        let is_synthetic = is_our_own_synthetic_event(event);
+                        if is_mouse_motion
+                            || matches!(
+                                event_type,
+                                CGEventType::KeyDown
+                                    | CGEventType::KeyUp
+                                    | CGEventType::FlagsChanged
+                            )
+                        {
                             tracing::info!(
                                 ?event_type,
                                 suppressed,
+                                is_synthetic,
                                 disposition = if suppressed { "drop" } else { "keep" },
                                 "tap callback observed event"
                             );
                         }
                         if suppressed {
+                            if is_mouse_motion
+                                && !is_synthetic
+                                && let Some(anchor_point) =
+                                    *anchor.lock().unwrap_or_else(|e| e.into_inner())
+                            {
+                                match post_synthetic_warp(anchor_point) {
+                                    Ok(()) => {
+                                        *last_position.lock().unwrap_or_else(|e| e.into_inner()) =
+                                            Some(anchor_point);
+                                    }
+                                    Err(e) => tracing::warn!(
+                                        error = ?e,
+                                        "failed to actively re-anchor the cursor while suppressed"
+                                    ),
+                                }
+                            }
                             CallbackResult::Drop
                         } else {
                             CallbackResult::Keep
@@ -265,20 +336,30 @@ impl Capture for MacCapture {
         // A fresh start() must never inherit a suppressed state from a
         // previous session -- same reasoning as `last_flags`/`last_position`
         // above. Also make sure the cursor is never left frozen behind
-        // (disassociated) if capture stops while a `Forwarding` session
-        // was still active.
+        // (disassociated, or pinned by the active correction) if
+        // capture stops while a `Forwarding` session was still active.
         self.suppress.store(false, Ordering::Relaxed);
+        *self.anchor.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
     }
 
     fn set_local_suppression(&mut self, suppress: bool) {
         self.suppress.store(suppress, Ordering::Relaxed);
-        // TEMPORARY diagnostic tracing (Bug 9 root-cause hunt): proves
-        // this method was actually called (and with what value) --
-        // "the code path executed" is not itself evidence the OS
-        // behavior changed, but its absence would immediately rule out
-        // "never called" as the cause.
         tracing::info!(suppress, "set_local_suppression called");
+        if suppress {
+            // Snapshot where the cursor is *right now* as the anchor
+            // the active correction (see the struct doc) will hold it
+            // at for the rest of this `Forwarding` session. Read after
+            // `RecenterLocal`'s own warp has already landed (that
+            // effect is applied before this call -- see
+            // `Session::handle_captured`), so this is the recentered
+            // position, not wherever the triggering edge crossing just
+            // left it.
+            let current = *self.last_position.lock().unwrap_or_else(|e| e.into_inner());
+            *self.anchor.lock().unwrap_or_else(|e| e.into_inner()) = current;
+        } else {
+            *self.anchor.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
         // See the struct doc: dropping the CGEvent alone does not stop
         // the OS from moving the visible cursor in response to raw HID
         // motion -- that needs this separate association toggle. Logged

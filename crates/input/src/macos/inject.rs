@@ -20,7 +20,7 @@ impl MacInject {
     }
 }
 
-fn event_source() -> Result<CGEventSource, InputError> {
+pub(crate) fn event_source() -> Result<CGEventSource, InputError> {
     CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|()| InputError::InjectFailed("failed to create CGEventSource".to_string()))
 }

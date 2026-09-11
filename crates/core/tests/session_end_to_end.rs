@@ -920,3 +920,79 @@ async fn local_capture_is_suppressed_exactly_on_local_forwarding_transitions() {
     assert_eq!(session.ownership_state(), OwnershipState::Local);
     assert_eq!(local_capture.suppression_calls, vec![true, false]);
 }
+
+#[tokio::test]
+async fn suppression_is_restored_even_when_the_disconnect_send_returns_a_generic_error() {
+    // Regression test for a real Mac->Windows hardware safety finding:
+    // "terminated the connection on Windows, still wasn't able to use
+    // my Mac keyboard and trackpad." Root cause: MessageStream::send
+    // (crates/net/src/framed.rs) always maps a broken connection to
+    // NetError::Transport, never the more specific ConnectionClosed --
+    // so a target disconnecting abruptly makes the *next* captured
+    // event's Session::apply hit the generic-error arm, which correctly
+    // calls remove_peer but then returns Err. The old handle_captured
+    // applied every effect with `?`, so that Err propagated straight
+    // out of the function before ever reaching the suppression-restore
+    // check -- silently leaving local input suppressed forever, in
+    // direct violation of "never leave local input permanently disabled
+    // after disconnect, crash, or transition failure."
+    let a = Device::new([29u8; 32]);
+    let b = Device::new([30u8; 32]);
+    let (peer_a, _peer_b) = connect_pair(&a, &b).await;
+    // Cloning before registering peer_a with the session: quinn's
+    // Connection is a cheap, Arc-backed handle, so closing this clone
+    // closes the same underlying connection peer_a's streams use.
+    let connection_handle = peer_a.connection.clone();
+
+    let layout = two_device_layout(a.device_id, b.device_id);
+    let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
+    session.add_peer(b.device_id, peer_a, (1000, 800));
+    let mut local_geometry = FakeGeometry::new((500, 400));
+    let mut local_capture = FakeCapture::default();
+
+    // -> Forwarding(B): suppression engages.
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert_eq!(local_capture.suppression_calls, vec![true]);
+
+    // Simulate B disconnecting abruptly (a real network drop, or the
+    // target process exiting) -- closed from our own side so the very
+    // next send on this connection fails deterministically and
+    // immediately, with no dependency on real network timing.
+    connection_handle.close(0u32.into(), b"simulated abrupt disconnect");
+
+    // A follow-up move now tries to forward to B and fails. The error
+    // must still reach the caller (unchanged behavior)...
+    let result = session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 1, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "a genuine send failure must still be surfaced to the caller"
+    );
+
+    // ...but ownership must have fallen back to Local regardless...
+    assert_eq!(
+        session.ownership_state(),
+        OwnershipState::Local,
+        "a disconnected target must still force ownership back to Local"
+    );
+    // ...and, the actual point of this test, local input suppression
+    // must have been lifted too -- not left stuck because apply()
+    // returned an error before the old code ever reached this check.
+    assert_eq!(
+        local_capture.suppression_calls,
+        vec![true, false],
+        "suppression must be restored even though the disconnect surfaced as an error"
+    );
+}

@@ -138,6 +138,26 @@ impl Session {
     /// only to toggle `set_local_suppression` exactly when ownership
     /// crosses the `Local`/`Forwarding` boundary (ADR-0009 decision 9),
     /// never on every event.
+    ///
+    /// **Real-hardware safety regression, fixed here**: a target
+    /// disconnecting abruptly (the peer process exiting, a network
+    /// drop) makes the *next* captured event's `apply()` call fail --
+    /// `MessageStream::send` always reports a broken connection as
+    /// `NetError::Transport`, never the more specific `ConnectionClosed`
+    /// (see `crates/net/src/framed.rs`), so `apply()`'s generic-error
+    /// arm returns `Err` after already calling `remove_peer` (which
+    /// correctly forces `Router` back to `Local`). The old code applied
+    /// every effect with `?` inside the loop below, so that `Err`
+    /// propagated straight out of this function *before* ever reaching
+    /// the suppression-restore check that follows the loop -- silently
+    /// leaving local input suppressed forever after a disconnect, in
+    /// direct violation of this project's own explicit safety
+    /// requirement ("never leave local input permanently disabled after
+    /// disconnect, crash, or transition failure"). Fixed by always
+    /// running the suppression check against `Router`'s actual final
+    /// state, regardless of whether applying any individual effect
+    /// failed -- the first error (if any) is still returned to the
+    /// caller afterward, unchanged from before.
     pub async fn handle_captured(
         &mut self,
         event: InputMessage,
@@ -145,8 +165,11 @@ impl Session {
         local_capture: &mut dyn Capture,
     ) -> Result<(), CoreError> {
         let was_local = matches!(self.router.state(), OwnershipState::Local);
+        let mut first_error = None;
         for effect in self.router.handle_captured(event) {
-            self.apply(effect, local_geometry).await?;
+            if let Err(e) = self.apply(effect, local_geometry).await {
+                first_error.get_or_insert(e);
+            }
         }
         let is_local = matches!(self.router.state(), OwnershipState::Local);
         if was_local && !is_local {
@@ -154,7 +177,10 @@ impl Session {
         } else if !was_local && is_local {
             local_capture.set_local_suppression(false);
         }
-        Ok(())
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     async fn apply(

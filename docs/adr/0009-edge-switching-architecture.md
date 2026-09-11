@@ -459,13 +459,71 @@ touched it) to become an `Arc<Mutex<..>>` field on `MacCapture`, since
 `set_local_suppression` (called from a different thread) now needs to
 read it to seed `anchor`.
 
-**Both fixes are additive, defense-in-depth layers — nothing from
-decisions 9/10 was removed.** The DPI-awareness fix, the disassociation
-toggle, and the tap-drop mechanism all remain exactly as they were;
-this decision adds a state-consistency fix (pure logic, unit-tested)
-and an active enforcement layer (real OS interaction, verified by
-real-hardware retest) on top. Phase 4 remains open until that retest
-confirms both symptoms are actually gone.
+**Update (2026-09-12): the active re-warp layer made things worse, and
+was removed — plus one severe, unrelated safety bug found by the same
+retest.** The real-hardware retest against this decision's active
+re-warp layer did not confirm it — instead it surfaced two new,
+serious findings.
+
+**The active re-warp caused the Windows-side cursor to behave
+"extremely out of control."** This layer used `CGWarpMouseCursorPosition`
+(via `core-graphics`'s `CGDisplay::warp_mouse_cursor_position`) — a
+different API than every other warp in this codebase, which all use
+`CGEventPost` plus `SYNTHETIC_EVENT_MARKER` tagging (see decision 5).
+`CGWarpMouseCursorPosition` is documented to move the cursor without
+generating a new event, which is exactly why it looked attractive for
+this: warping back on every suppressed move without needing to filter
+out the resulting event. Real hardware evidence points at that
+documented guarantee not holding on this macOS version for at least
+one input path: every suppressed real move forcing a re-warp back to
+`anchor` would, if the warp itself generated even an occasional
+spurious `MouseMoved` event, feed a corrective delta back into the
+exact same capture pipeline and forward it to the target as if it were
+real input — compounding with every real move, which matches
+"extremely out of control" far better than a simple constant offset or
+a fixed scale error would. **Removed, not patched further**: the
+disassociation + tap-drop mechanism from decision 9 was already
+directly verified sufficient on its own (the 135-sample, 3-session
+ground-truth measurement earlier in this decision) before the active
+layer was ever added, so removing it costs nothing already proven to
+work. `crates/input/src/macos/capture.rs` is back to exactly its
+decision-9/10 shape (`last_position` reverted from `Arc<Mutex<..>>`
+back to a plain thread-local `Cell`, since nothing outside the capture
+thread needs to read it anymore).
+
+**A severe, independent safety bug**: "terminated the connection on
+Windows, still wasn't able to use my Mac keyboard and trackpad." Root
+cause: `MessageStream::send` (`crates/net/src/framed.rs`) always maps
+a broken connection to `NetError::Transport`, never the more specific
+`NetError::ConnectionClosed` — so a target disconnecting abruptly
+(the exact scenario this whole ADR's disconnect handling is supposed
+to cover) makes the *next* captured event's `Session::apply` hit the
+generic-error arm. That arm correctly calls `remove_peer` (forcing
+`Router` back to `Local`) but then returns `Err`. The old
+`Session::handle_captured` applied every effect with `?` inside its
+loop, so that `Err` propagated straight out of the function *before*
+ever reaching the suppression-restore check that follows the loop —
+silently leaving local input suppressed forever, in direct violation
+of this project's own explicit safety requirement that local input
+must never stay disabled after a disconnect, crash, or transition
+failure. Fixed by restructuring `handle_captured` to always evaluate
+the suppression toggle against `Router`'s actual final state,
+collecting (not `?`-propagating) any error from applying an individual
+effect and returning it only afterward — the caller still sees the
+error exactly as before, but the safety-critical restore step can no
+longer be skipped by it. New regression test (a real, closed
+loopback-`Peer` connection, not a fake):
+`suppression_is_restored_even_when_the_disconnect_send_returns_a_generic_error`
+in `session_end_to_end.rs`.
+
+**Both fixes are subtractive/corrective, not additive** — the opposite
+of decision 11's original framing. The active re-warp layer is gone;
+decision 9's original two-layer mechanism (proven sufficient by direct
+measurement) stands alone again. The disconnect-safety fix touches
+`session.rs` only, not `router.rs`/`ownership.rs`. Phase 4 remains
+open until a clean real-hardware retest confirms both original
+symptoms (local-input leak, Windows pointer range) are gone *and* that
+this fresh regression (chaotic Windows-side movement) is gone too.
 
 ## Consequences
 
@@ -474,17 +532,20 @@ confirms both symptoms are actually gone.
   at a time. `crates/input` gains `PointerGeometry`, implemented for
   all three existing backends. `crates/protocol` gains one changed and
   one new `ControlMessage` variant.
-- Automated coverage: 53 unit tests in `kvm-core` (`layout`/`ownership`/
-  `router`, all pure, no I/O) plus 10 real-loopback-`Peer` integration
-  tests in `crates/core/tests/session_end_to_end.rs` covering edge
+- Automated coverage: 54 unit tests in `kvm-core` (`layout`/`ownership`/
+  `router`, all pure, no I/O, including a dead-edge clamp-to-the-exact-
+  boundary regression) plus 11 real-loopback-`Peer` integration tests
+  in `crates/core/tests/session_end_to_end.rs` covering edge
   crossing + cursor warp, screen-size exchange, an unregistered device
   never becoming a target, disconnect/reconnect without restarting the
   session, modifier flush landing as ordinary input on the old target,
   no leakage to an inactive-but-connected peer, rapid back-and-forth
   re-warping, `RecenterLocal` actually reaching `PointerGeometry`, a
-  single transient injection failure not killing the session, and
+  single transient injection failure not killing the session,
   local-capture suppression toggling exactly on `Local`/`Forwarding`
-  transitions (decision 9). None of this depends on physical hardware.
+  transitions (decision 9), and suppression being restored even when a
+  disconnect-triggered send surfaces as a generic error rather than
+  `ConnectionClosed`. None of this depends on physical hardware.
 - `crates/core/examples/edge_switch_relay.rs` is the manual-QA tool for
   real hardware, driving `docs/manual-qa/phase-4-edge-switching.md`.
 - Decision 8's limitation is resolved by decision 9 for macOS and

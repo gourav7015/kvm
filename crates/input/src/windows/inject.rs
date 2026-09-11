@@ -8,9 +8,9 @@ use kvm_protocol::{ButtonState, InputMessage, MouseButton};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
+    SendInput,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos, XBUTTON1,
@@ -91,7 +91,34 @@ impl Inject for WindowsInject {
                 })?;
                 send(keyboard_input(vk.0, state == ButtonState::Pressed))
             }
-            InputMessage::MouseMove { dx, dy } => send(mouse_input(dx, dy, 0, MOUSEEVENTF_MOVE.0)),
+            InputMessage::MouseMove { dx, dy } => {
+                // Real hardware finding (Mac->Windows QA, ADR-0009): a
+                // relative SendInput move (MOUSEEVENTF_MOVE without
+                // MOUSEEVENTF_ABSOLUTE) goes through the same pointer-
+                // acceleration ("Enhance pointer precision") curve as a
+                // real mouse -- a nonlinear, speed-dependent transform.
+                // The sending side accumulates raw 1:1 deltas
+                // (`Router`'s `virtual_cursor`), so accelerated relative
+                // injection drifts away from that tracked position --
+                // worse on fast swipes, which is exactly the reported
+                // "sometimes more, sometimes less" inconsistency and
+                // the cursor feeling boxed into a fraction of the real
+                // screen. `SetCursorPos` (already used for
+                // `PointerGeometry::set_cursor_position`) applies no
+                // acceleration at all, so reading the real current
+                // position and adding the delta keeps this path exactly
+                // in sync with what the sending side expects.
+                let mut point = POINT { x: 0, y: 0 };
+                // SAFETY: `point` is a valid, fully-initialized `POINT`
+                // the API writes into; matches `GetCursorPos`'s
+                // documented contract.
+                unsafe { GetCursorPos(&mut point) }
+                    .map_err(|e| InputError::InjectFailed(format!("GetCursorPos failed: {e}")))?;
+                // SAFETY: plain integer coordinates, no buffer/pointer
+                // contract to uphold.
+                unsafe { SetCursorPos(point.x + dx, point.y + dy) }
+                    .map_err(|e| InputError::InjectFailed(format!("SetCursorPos failed: {e}")))
+            }
             InputMessage::MouseButton { button, state } => {
                 // "Other" extra buttons have no dedicated MOUSEEVENTF_*
                 // flag; approximate with XBUTTON1 rather than failing

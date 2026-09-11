@@ -270,6 +270,47 @@ so far:
   that choice in both hook procs, after the event has already been
   converted and sent to the sink.
 
+**Update (2026-09-11, second real-hardware retest): two more findings,
+both fixed the same way this ADR treats every other real-hardware
+finding — root-caused, not patched around.**
+
+1. **Dropping the `CGEvent` alone did not stop the Mac's own cursor
+   from visibly moving.** The first retest showed the local cursor
+   still tracking every forwarded move. Root cause: a `CGEventTap`'s
+   disposition of one `CGEvent` controls whether *that event* is
+   delivered further down the chain to other apps — it does not
+   control the WindowServer's own cursor-position tracking, which
+   consumes raw HID mouse motion independently of any tap's decision
+   about the resulting `CGEvent`. The actual mechanism for freezing the
+   visible cursor while still receiving raw deltas is
+   `CGAssociateMouseAndMouseCursorPosition` (exposed safely by
+   `core-graphics` as `CGDisplay::associate_mouse_and_mouse_cursor_position`)
+   — the same API used by anything needing raw relative mouse input
+   without the OS cursor visibly moving (e.g. games reading "mouse
+   look"). `MacCapture::set_local_suppression` now toggles this
+   alongside the existing tap-drop flag: `false` (disassociated) while
+   suppressing, `true` (reassociated) when returning to `Local` or on
+   `stop()` (so a stopped capture never leaves the cursor frozen).
+   HID-driven `CGEventMouseMoved` events keep flowing to the tap either
+   way, so forwarding itself is unaffected — only the local cursor's
+   on-screen position stops updating.
+
+2. **The Windows-side cursor felt inconsistently boxed into a fraction
+   of the real screen** ("sometimes more, sometimes less" range, not a
+   fixed sub-region). Root cause: `WindowsInject`'s `MouseMove`
+   injection used `SendInput` with relative `MOUSEEVENTF_MOVE`, which
+   Windows passes through the same pointer-acceleration ("Enhance
+   pointer precision") curve applied to a real mouse — a nonlinear,
+   speed-dependent transform. The sending side's `Router` accumulates
+   raw, unaccelerated 1:1 deltas into `virtual_cursor`; accelerated
+   relative injection on the receiving end drifts away from that
+   tracked position, worse on fast swipes (exactly the reported
+   inconsistency). Fixed by reading the real current position via
+   `GetCursorPos` and calling `SetCursorPos(x + dx, y + dy)` instead —
+   the same unaccelerated API already used for
+   `PointerGeometry::set_cursor_position`, so injected motion now
+   matches what `Router` expects exactly, with no protocol change.
+
 **Not yet implemented, an explicit rollout gap, not silently
 overlooked:** X11 (`crates/input/src/x11/capture.rs`) keeps the
 trait's default no-op. Its raw XI2 capture model has no per-event

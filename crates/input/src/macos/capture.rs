@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
+use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
     CGEventTapProxy, CGEventType, CallbackResult,
@@ -47,6 +48,22 @@ unsafe extern "C" {
 /// keystrokes kept landing in whatever Mac app had focus) — genuinely
 /// disruptive, not merely cosmetic, so this backend now suppresses
 /// local delivery for the duration of a `Forwarding` session.
+///
+/// **Suppression is two real, separate mechanisms, not one** — a
+/// second real-hardware finding on top of the first: dropping the
+/// `CGEvent` (via the tap callback returning `CallbackResult::Drop`)
+/// stops *event delivery* to other apps, which is sufficient for
+/// keyboard input, but does **not** stop the WindowServer's own cursor
+/// position from tracking raw HID mouse motion — that tracking runs
+/// independently of whatever any single event tap decides to do with
+/// the resulting `CGEvent`. Actually freezing the visible cursor needs
+/// [`CGDisplay::associate_mouse_and_mouse_cursor_position`] set to
+/// `false`, the same API used for exactly this purpose by tools that
+/// need raw relative mouse deltas without the OS cursor visibly moving
+/// (e.g. games reading "mouse look" input) — HID motion (and therefore
+/// this tap's own `MouseMoved` events) keeps flowing normally while
+/// disassociated, so forwarding is unaffected; only the local cursor's
+/// on-screen position stops updating.
 #[derive(Default)]
 pub struct MacCapture {
     run_loop: Option<CFRunLoop>,
@@ -205,11 +222,27 @@ impl Capture for MacCapture {
         }
         // A fresh start() must never inherit a suppressed state from a
         // previous session -- same reasoning as `last_flags`/`last_position`
-        // above.
+        // above. Also make sure the cursor is never left frozen behind
+        // (disassociated) if capture stops while a `Forwarding` session
+        // was still active.
         self.suppress.store(false, Ordering::Relaxed);
+        let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
     }
 
     fn set_local_suppression(&mut self, suppress: bool) {
         self.suppress.store(suppress, Ordering::Relaxed);
+        // See the struct doc: dropping the CGEvent alone does not stop
+        // the OS from moving the visible cursor in response to raw HID
+        // motion -- that needs this separate association toggle. A
+        // failure here is logged, not fatal: capture keeps running
+        // either way, and the tap-level Drop above still stops
+        // keyboard/button events from reaching local apps regardless.
+        if let Err(e) = CGDisplay::associate_mouse_and_mouse_cursor_position(!suppress) {
+            tracing::warn!(
+                error = ?e,
+                suppress,
+                "failed to toggle mouse/cursor association"
+            );
+        }
     }
 }

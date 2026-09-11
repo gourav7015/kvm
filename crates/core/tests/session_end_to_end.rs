@@ -1065,3 +1065,157 @@ async fn active_target_connection_closed_detects_a_closed_connection_with_no_sen
         "a closed connection to the active target must be detectable with no send attempt"
     );
 }
+
+#[tokio::test]
+async fn ownership_matrix_local_forwarding_keyboard_and_disconnect() {
+    // Regression test walking the exact Phase 4 ownership contract:
+    //   Local + mouse   -> local allowed, no suppression
+    //   Forwarding + mouse    -> local suppressed, remote forwarded
+    //   Forwarding + keyboard -> local (still) suppressed, remote forwarded
+    //   Forwarding -> Local   -> local restored
+    //   Forwarding -> disconnect -> local restored
+    // in one place, as a single source of truth for the contract
+    // rather than scattered across several narrower tests.
+    let a = Device::new([33u8; 32]);
+    let b = Device::new([34u8; 32]);
+    let (peer_a, mut peer_b) = connect_pair(&a, &b).await;
+    let connection_handle = peer_a.connection.clone();
+
+    // A two-way edge (unlike `two_device_layout`, which only maps one
+    // direction): this test needs to cross back via an ordinary edge
+    // crossing, not just via a forced disconnect.
+    let mut layout = Layout::new();
+    layout.add_device(LayoutDevice {
+        device_id: a.device_id,
+        label: "a".to_string(),
+        enabled: true,
+    });
+    layout.add_device(LayoutDevice {
+        device_id: b.device_id,
+        label: "b".to_string(),
+        enabled: true,
+    });
+    layout
+        .set_neighbor(a.device_id, Edge::Right, b.device_id)
+        .unwrap();
+    layout
+        .set_neighbor(b.device_id, Edge::Left, a.device_id)
+        .unwrap();
+    let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
+    session.add_peer(b.device_id, peer_a, (1000, 800));
+    let mut local_geometry = FakeGeometry::new((500, 400));
+    let mut local_capture = FakeCapture::default();
+
+    // Local + mouse -> local allowed: no effect at all, no suppression
+    // call, since the OS already applied this event itself.
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 1, dy: 1 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert_eq!(session.ownership_state(), OwnershipState::Local);
+    assert!(local_capture.suppression_calls.is_empty());
+
+    // -> Forwarding(B): crossing the edge enables remote forwarding and
+    // engages local suppression together, as one transition.
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.ownership_state(),
+        OwnershipState::Forwarding { target, .. } if target == b.device_id
+    ));
+    assert_eq!(local_capture.suppression_calls, vec![true]);
+
+    // Forwarding + mouse -> local (still) suppressed, remote forwarded.
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 5, dy: 5 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        local_capture.suppression_calls,
+        vec![true],
+        "an ordinary forwarded move must not re-toggle suppression"
+    );
+
+    // Forwarding + keyboard -> local (still) suppressed, remote forwarded.
+    session
+        .handle_captured(
+            key_event(Key::A, ButtonState::Pressed),
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        local_capture.suppression_calls,
+        vec![true],
+        "a forwarded key event must not re-toggle suppression either"
+    );
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            peer_b.streams.input.recv(),
+        )
+        .await
+        {
+            Ok(Ok(Message::Input(InputMessage::Key { key: Key::A, .. }))) => break,
+            _ => assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for B to receive the forwarded key"
+            ),
+        }
+    }
+
+    // Forwarding -> Local: local input restored.
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: -1100, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert_eq!(session.ownership_state(), OwnershipState::Local);
+    assert_eq!(local_capture.suppression_calls, vec![true, false]);
+
+    // Forwarding -> disconnect -> local restored, via the same
+    // centralized remove_peer path (decision 12).
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.ownership_state(),
+        OwnershipState::Forwarding { .. }
+    ));
+    connection_handle.close(0u32.into(), b"simulated abrupt disconnect");
+    let result = session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 1, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(session.ownership_state(), OwnershipState::Local);
+    assert_eq!(local_capture.suppression_calls.last(), Some(&false));
+}

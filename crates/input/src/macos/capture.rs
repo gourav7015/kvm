@@ -65,42 +65,34 @@ unsafe extern "C" {
 /// disassociated, so forwarding is unaffected; only the local cursor's
 /// on-screen position stops updating.
 ///
-/// **A third, "active re-warp" layer was tried twice, and reverted
-/// both times** (see ADR-0009 decisions 11 and 13's Updates) — the
-/// general idea ("keep forcibly resetting the cursor to a fixed anchor
-/// every time suppressed motion is observed") has now failed on two
-/// independent implementations, which is itself the finding: this
-/// class of fix is not safe to keep retrying with a third API.
+/// **Two "active re-warp" attempts were tried and reverted** (see ADR-0009
+/// decisions 11 and 13's Updates) — moving the cursor back after the
+/// fact, via two different APIs, produced two different runaway-loop
+/// failures. That class of fix (compensate after the OS already moved
+/// the cursor) is abandoned. This backend instead makes sure the
+/// association call that's supposed to *prevent* the movement in the
+/// first place is actually applied where it can reliably take effect.
 ///
-/// - Attempt 1 used `CGWarpMouseCursorPosition`, on the theory that its
-///   documented "generates no event" behavior would let it correct the
-///   cursor invisibly. Real hardware QA found the *target* machine's
-///   cursor behaving "extremely out of control" — consistent with that
-///   guarantee not holding on this macOS version, feeding spurious
-///   corrective deltas into the capture pipeline and forwarding them
-///   as real input.
-/// - Attempt 2 switched to the codebase's own proven `CGEventPost` +
-///   `SYNTHETIC_EVENT_MARKER` pattern specifically to avoid that
-///   failure mode (its echo *is* correctly filtered from ever being
-///   forwarded). It failed a different way: real hardware QA showed
-///   the *same* delta (e.g. `dx=74, dy=-85`) being sent to the target
-///   hundreds of times per second, continuously, for several seconds —
-///   consistent with a feedback loop where repeatedly resetting
-///   position to a fixed anchor while the user holds physical contact
-///   near an edge causes each cycle's residual real motion, measured
-///   from that same anchor, to look identical to the last, so it never
-///   settles.
-///
-/// Both mechanisms below were already directly verified sufficient on
-/// their own by an independent ground-truth measurement (reading real
-/// OS cursor position on a fixed cadence across three live
-/// `Forwarding` sessions, frozen every time) before either active
-/// layer was tried — they remain the standing implementation. A real,
-/// still-open discrepancy exists between that measurement and at least
-/// one later hardware report of the cursor moving anyway; resolving it
-/// needs a fundamentally different mechanism (not another "reset to an
-/// anchor" variant) or clearer reproduction steps, not a third attempt
-/// at this same shape of fix.
+/// **Thread affinity (decision 14): the association call now runs on
+/// the capture thread itself, continuously, not once from whichever
+/// thread calls `set_local_suppression`.** `CGAssociateMouseAndMouseCursorPosition`
+/// is a WindowServer-connected Core Graphics call; like several other
+/// APIs in this family, its effect is tied to the specific
+/// thread/run-loop context it's issued from. The previous
+/// implementation called it directly from `set_local_suppression`'s
+/// caller — an async-runtime worker thread with no relationship to the
+/// dedicated thread that owns this tap's `CGEventTap`/`CFRunLoop` — a
+/// real, previously-untried candidate for why an independent
+/// ground-truth measurement showed the position frozen in one real
+/// session while later hardware reports showed the cursor moving in
+/// the same shape of session. `set_local_suppression` now only flips
+/// the shared `suppress` flag; the capture thread's own callback
+/// re-applies the association to match that flag on every observed
+/// mouse-motion event — not merely once when it changes, so it's also
+/// a standing hardening against the OS silently resetting the
+/// association under conditions this project hasn't identified (a
+/// focus change, Mission Control, etc.), rather than a one-shot call
+/// that could silently stop holding.
 #[derive(Default)]
 pub struct MacCapture {
     run_loop: Option<CFRunLoop>,
@@ -140,6 +132,11 @@ impl Capture for MacCapture {
                 // a shared reference.
                 let last_flags = Cell::new(CGEventFlags::empty());
                 let last_position: Cell<Option<core_graphics::geometry::CGPoint>> = Cell::new(None);
+                // `None` until the first mouse-motion event applies an
+                // initial association state; used only to decide whether
+                // a change is worth a log line (see decision 14) -- the
+                // association call itself is unconditional every time.
+                let last_applied_association: Cell<Option<bool>> = Cell::new(None);
 
                 let tap = CGEventTap::new(
                     CGEventTapLocation::HID,
@@ -197,30 +194,62 @@ impl Capture for MacCapture {
                         // whether this machine's *own* OS also acts on
                         // it depends on `suppress` (ADR-0009 decision 9).
                         let suppressed = suppress.load(Ordering::Relaxed);
-                        // TEMPORARY diagnostic tracing (Bug 9 root-cause
-                        // hunt): direct, per-event runtime proof of (a)
-                        // whether the callback is actually observing this
-                        // event at all while forwarding, and (b) what
-                        // disposition it actually chose -- not merely
-                        // that the suppression code path was reached.
-                        // Restrict to the event kinds suppression cares
-                        // about so a normal Local session isn't flooded.
-                        if matches!(
+                        let is_mouse_motion = matches!(
                             event_type,
                             CGEventType::MouseMoved
                                 | CGEventType::LeftMouseDragged
                                 | CGEventType::RightMouseDragged
                                 | CGEventType::OtherMouseDragged
-                                | CGEventType::KeyDown
-                                | CGEventType::KeyUp
-                                | CGEventType::FlagsChanged
-                        ) {
+                        );
+                        if is_mouse_motion
+                            || matches!(
+                                event_type,
+                                CGEventType::KeyDown
+                                    | CGEventType::KeyUp
+                                    | CGEventType::FlagsChanged
+                            )
+                        {
                             tracing::info!(
                                 ?event_type,
                                 suppressed,
                                 disposition = if suppressed { "drop" } else { "keep" },
                                 "tap callback observed event"
                             );
+                        }
+                        // See the struct doc (decision 14): applied here,
+                        // on this tap's own thread, on *every*
+                        // mouse-motion event -- not once from whichever
+                        // thread calls `set_local_suppression`, and not
+                        // only when `suppressed` changes. Reapplying
+                        // continuously (rather than once per transition)
+                        // is a deliberate hardening against the OS
+                        // silently resetting the association for reasons
+                        // this project hasn't identified -- there is no
+                        // independent way to detect such a reset, so the
+                        // only robust defense is to never stop asserting
+                        // the intended state. The log line is still only
+                        // emitted on an actual change, so a healthy
+                        // session isn't flooded.
+                        if is_mouse_motion {
+                            match CGDisplay::associate_mouse_and_mouse_cursor_position(!suppressed)
+                            {
+                                Ok(()) => {
+                                    if last_applied_association.replace(Some(!suppressed))
+                                        != Some(!suppressed)
+                                    {
+                                        tracing::info!(
+                                            suppressed,
+                                            connected = !suppressed,
+                                            "CGAssociateMouseAndMouseCursorPosition applied from capture thread"
+                                        );
+                                    }
+                                }
+                                Err(e) => tracing::warn!(
+                                    error = ?e,
+                                    suppressed,
+                                    "CGAssociateMouseAndMouseCursorPosition failed"
+                                ),
+                            }
                         }
                         if suppressed {
                             CallbackResult::Drop
@@ -294,30 +323,23 @@ impl Capture for MacCapture {
 
     fn set_local_suppression(&mut self, suppress: bool) {
         self.suppress.store(suppress, Ordering::Relaxed);
-        // TEMPORARY diagnostic tracing (Bug 9 root-cause hunt): proves
-        // this method was actually called (and with what value) --
-        // "the code path executed" is not itself evidence the OS
-        // behavior changed, but its absence would immediately rule out
-        // "never called" as the cause.
         tracing::info!(suppress, "set_local_suppression called");
-        // See the struct doc: dropping the CGEvent alone does not stop
-        // the OS from moving the visible cursor in response to raw HID
-        // motion -- that needs this separate association toggle. Logged
-        // on both success and failure (not just failure) so a passing
-        // Ok(()) here can be directly checked against whether the real
-        // cursor position actually stopped moving (a separate,
-        // independent measurement -- see edge_switch_relay.rs).
-        match CGDisplay::associate_mouse_and_mouse_cursor_position(!suppress) {
-            Ok(()) => tracing::info!(
-                suppress,
-                connected = !suppress,
-                "CGAssociateMouseAndMouseCursorPosition succeeded"
-            ),
-            Err(e) => tracing::warn!(
+        // Best-effort immediate attempt, in addition to (not instead
+        // of) the capture thread's own continuous reapplication on
+        // every mouse-motion event -- see decision 14 (struct doc). If
+        // this call's thread-affinity concern is real, the capture
+        // thread's reapplication is what actually matters and covers
+        // the very next motion event regardless; if it isn't, this
+        // proactive call covers the narrow window between the switch
+        // and whatever motion event happens next, at zero cost either
+        // way.
+        if let Err(e) = CGDisplay::associate_mouse_and_mouse_cursor_position(!suppress) {
+            tracing::warn!(
                 error = ?e,
                 suppress,
-                "CGAssociateMouseAndMouseCursorPosition failed"
-            ),
+                "immediate CGAssociateMouseAndMouseCursorPosition attempt failed \
+                 (non-fatal -- the capture thread reapplies this on the next motion event)"
+            );
         }
     }
 }

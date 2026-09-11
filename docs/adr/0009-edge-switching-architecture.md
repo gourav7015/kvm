@@ -677,6 +677,111 @@ resolving it needs either a fundamentally different mechanism than
 isolate exactly when the two disagree — not another variant of the
 same fix.
 
+### 14. Thread affinity: the association call now runs on the capture thread, continuously
+
+**Update (2026-09-12):** with "reset to an anchor" abandoned (decision
+13's Update), the only mechanism left for the local-input-leak symptom
+is making sure `CGAssociateMouseAndMouseCursorPosition` itself actually
+takes hold reliably — not compensating after it doesn't. Every prior
+implementation called it directly from `set_local_suppression`'s
+caller — an async-runtime worker thread with no relationship to the
+dedicated thread that owns this tap's `CGEventTap`/`CFRunLoop`.
+`CGAssociateMouseAndMouseCursorPosition` is a WindowServer-connected
+Core Graphics call; several APIs in this family are documented or
+empirically known to have thread/run-loop affinity to the connection
+that issued them. This had never been tried as an explanation for why
+an independent ground-truth measurement (decision 9) showed the
+position frozen in one real session while a later report showed it
+moving in the same shape of session.
+
+Fix: `set_local_suppression` now only flips the shared `suppress` flag
+(plus a best-effort immediate call, kept as a zero-cost extra attempt,
+not the mechanism being relied on). The capture thread's own tap
+callback re-applies the association to match `suppress` on *every*
+observed mouse-motion event — not merely once when the flag changes.
+Continuous reapplication, not a one-shot call, is deliberate: if the OS
+silently resets the association under some condition this project
+hasn't identified (a focus change, Mission Control, etc.), there is no
+independent way to detect that reset, so the only robust defense is to
+never stop asserting the intended state. The log line is still only
+emitted on an actual change, so a healthy session isn't flooded.
+
+Not independently unit-testable (a WindowServer-connection thread
+affinity effect is a real OS interaction, same category as every other
+item in this list) — requires real-hardware retest.
+
+### 15. `Router::state()` didn't track ordinary in-bounds movement at all — found by a new geometry test, fixed by construction
+
+**Update (2026-09-12):** while adding the pointer-range regression
+tests below, a second, more fundamental version of decision 9's
+state/position desync surfaced. Decision 9 fixed the *dead-edge-clamp*
+branch specifically; this is the far more common case: `self.state`
+(the field `state()` returned directly) is only ever mutated at an
+actual switch or a dead-edge clamp — an *ordinary in-bounds move while
+already `Forwarding`* (most captured mouse motion, by far) updates
+`self.position` and returns without touching `self.state` at all. A
+new test driving the tracked position through all four corners of a
+1366x768 (real Windows hardware) screen and then to the center caught
+this directly: after several corner-to-corner clamped moves (each
+correctly synced by decision 9's fix) an *ordinary* move to the center
+left `state()` reporting the stale pre-move corner position instead of
+the center — `self.position` was correct throughout, only the public
+accessor's *reporting* of it was stale.
+
+Fixed by construction rather than by chasing down every mutation site
+that would need to remember to keep a second copy in sync:
+`Router::state()` now derives `Forwarding`'s `virtual_cursor` from the
+live `self.position` on every call, discarding whatever value was
+stored in `self.state`'s own copy. `self.state`'s internal field is
+untouched otherwise — `ownership::transition`'s own equality checks
+(`new_state == old_state`) still compare exactly what they did before,
+so no routing *decision* changes, only what the public accessor
+reports to external callers (tests, `Session`, `edge_switch_relay.rs`'s
+diagnostics).
+
+New regression test:
+`full_windows_shaped_screen_is_reachable_at_all_four_corners_and_center`
+in `router.rs` — drives a 1366x768 target (the real Windows hardware
+shape) to all four exact corners and the center, both directions, with
+both large (overshoot-and-clamp) and small (exact single-unit) deltas.
+Failed against the pre-fix `state()` (reported a stale corner instead
+of the center) and passes now.
+
+### 16. Windows coordinate mapping re-verified against the real-hardware log; no defect found, no new abstraction added
+
+**Update (2026-09-12):** re-reviewed against an explicit checklist
+(reported width/height, DPI/scaling, virtual-screen origin, physical
+vs. logical pixels, relative vs. absolute injection, `SendInput`
+coordinate requirements) using the real Mac<->Windows hardware log
+already captured, rather than assuming either that decision 10's fix
+was sufficient or that a new abstraction was needed. Every relevant log
+line showed `matched=true` — the real, post-write `GetCursorPos`
+reading equaled the intended target — for every move that stayed
+in-bounds, and the only `matched=false` lines were the OS correctly
+clamping at a true screen boundary (a real cursor cannot be placed
+outside its screen; that mismatch is expected, not a bug). DPI was
+confirmed 96/100% with Per-Monitor-V2 awareness declared (decision 10)
+on the actual test hardware. Multi-monitor virtual-screen origin
+remains the one explicitly out-of-scope case (decision 3) and wasn't
+re-litigated, since the real test hardware is a single-display laptop.
+
+**No new `PointerGeometry`/coordinate-adapter abstraction was added.**
+The router already never sees a Windows/macOS/X11-specific coordinate
+— `Effect::Send`/`Effect::Switch` carry only relative deltas or
+resolution-independent `(i32, i32)` positions, and per-OS conversion
+already lives entirely inside each backend's `Inject`/`PointerGeometry`
+implementation. Introducing a new abstraction layer on top of an
+already-evidenced-correct implementation, with no defect to fix, would
+be exactly the kind of change this project's own standing rule warns
+against ("no arbitrary behavior without evidence") — the apparent
+"compressed range" symptom is far better explained by decision 13's
+now-reverted feedback-loop bug (which would visibly pin the target
+cursor near whatever corner the runaway resend last drove it to) than
+by any remaining coordinate defect. `full_windows_shaped_screen_is_reachable_at_all_four_corners_and_center`
+(decision 15) locks in the already-correct common-pointer-model
+behavior with a real regression test rather than leaving this only as
+log-based evidence.
+
 ## Consequences
 
 - `crates/core` gains `layout.rs`, `ownership.rs`, `router.rs`,
@@ -684,10 +789,11 @@ same fix.
   at a time. `crates/input` gains `PointerGeometry`, implemented for
   all three existing backends. `crates/protocol` gains one changed and
   one new `ControlMessage` variant.
-- Automated coverage: 54 unit tests in `kvm-core` (`layout`/`ownership`/
+- Automated coverage: 55 unit tests in `kvm-core` (`layout`/`ownership`/
   `router`, all pure, no I/O, including a dead-edge clamp-to-the-exact-
-  boundary regression) plus 12 real-loopback-`Peer` integration tests
-  in `crates/core/tests/session_end_to_end.rs` covering edge
+  boundary regression and full four-corner-plus-center reachability for
+  a real Windows-shaped screen) plus 13 real-loopback-`Peer` integration
+  tests in `crates/core/tests/session_end_to_end.rs` covering edge
   crossing + cursor warp, screen-size exchange, an unregistered device
   never becoming a target, disconnect/reconnect without restarting the
   session, modifier flush landing as ordinary input on the old target,

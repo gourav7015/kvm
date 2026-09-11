@@ -130,8 +130,36 @@ impl Router {
         }
     }
 
+    /// The current ownership state, with `Forwarding`'s `virtual_cursor`
+    /// always reflecting the live `self.position` — not whatever value
+    /// was last written into `self.state`'s own copy.
+    ///
+    /// **Real-hardware regression, fixed here**: `self.state` is
+    /// mutated only at specific moments (an actual switch, or the
+    /// dead-edge clamp branch) — an ordinary in-bounds move while
+    /// already `Forwarding` (the overwhelmingly common case: most
+    /// captured mouse motion neither crosses an edge nor gets clamped
+    /// at one) updates `self.position` and returns without ever
+    /// touching `self.state` at all. Returning `self.state` directly
+    /// from this accessor therefore reported a virtual_cursor frozen
+    /// at whatever the *last* transition or clamp happened to leave
+    /// it — not the actual current position — for every ordinary move
+    /// in between, silently violating this module's own documented
+    /// invariant that `state()` and `self.position` never disagree.
+    /// Deriving `virtual_cursor` from `self.position` here, rather
+    /// than chasing down every internal mutation site that needs to
+    /// keep a second copy in sync, makes this correct by construction:
+    /// `self.state`'s own internal field is untouched (still exactly
+    /// what `ownership::transition`'s equality checks need), only this
+    /// public accessor's *reporting* of it changes.
     pub fn state(&self) -> OwnershipState {
-        self.state
+        match self.state {
+            OwnershipState::Local => OwnershipState::Local,
+            OwnershipState::Forwarding { target, .. } => OwnershipState::Forwarding {
+                target,
+                virtual_cursor: self.position,
+            },
+        }
     }
 
     /// Re-anchors our tracked position to a real OS reading — callers
@@ -961,5 +989,72 @@ mod tests {
             },
             "must clamp to the exact true bottom edge (height-1), not short of it"
         );
+    }
+
+    /// Regression test for the Phase 4 pointer-range acceptance
+    /// criteria (a real Windows target: 1366x768). The common pointer
+    /// model `Router` maintains -- independent of any specific OS's
+    /// injection path -- must reach all four exact corners and the
+    /// center, not some compressed sub-rectangle. `NEIGHBOR` has no
+    /// edges of its own configured, so every one of its edges is a
+    /// dead end that clamps in place rather than switching onward,
+    /// letting this test explore its full extent freely. Both large
+    /// (overshoot-and-clamp) and small (exact single-unit) deltas are
+    /// exercised, in every direction.
+    #[test]
+    fn full_windows_shaped_screen_is_reachable_at_all_four_corners_and_center() {
+        let layout = layout_with(&[(US, Edge::Right, NEIGHBOR)]);
+        let mut router = Router::new(US, PlatformKind::MacOs, layout, (1000, 800), (500, 400));
+        router.set_peer_connected(NEIGHBOR, (1366, 768));
+
+        router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
+        assert!(matches!(
+            router.state(),
+            OwnershipState::Forwarding {
+                target: NEIGHBOR,
+                ..
+            }
+        ));
+
+        let assert_at = |router: &Router, expected: (i32, i32), label: &str| {
+            assert_eq!(
+                router.state(),
+                OwnershipState::Forwarding {
+                    target: NEIGHBOR,
+                    virtual_cursor: expected,
+                },
+                "{label}: expected to reach {expected:?}"
+            );
+        };
+
+        // Top-left: a huge overshoot in both axes at once must clamp
+        // to exactly (0, 0), not merely "close to" it.
+        router.handle_captured(InputMessage::MouseMove {
+            dx: -10_000,
+            dy: -10_000,
+        });
+        assert_at(&router, (0, 0), "top-left corner");
+
+        // Top-right: large positive dx only.
+        router.handle_captured(InputMessage::MouseMove { dx: 10_000, dy: 0 });
+        assert_at(&router, (1365, 0), "top-right corner");
+
+        // Bottom-right: large positive dy only.
+        router.handle_captured(InputMessage::MouseMove { dx: 0, dy: 10_000 });
+        assert_at(&router, (1365, 767), "bottom-right corner");
+
+        // Bottom-left: large negative dx only.
+        router.handle_captured(InputMessage::MouseMove { dx: -10_000, dy: 0 });
+        assert_at(&router, (0, 767), "bottom-left corner");
+
+        // A small, exact step off a corner must move by exactly that
+        // much -- not stay clamped, and not overshoot.
+        router.handle_captured(InputMessage::MouseMove { dx: 1, dy: -1 });
+        assert_at(&router, (1, 766), "a small step off the bottom-left corner");
+
+        // The center is freely reachable via an ordinary in-bounds
+        // move (no clamping involved at all).
+        router.handle_captured(InputMessage::MouseMove { dx: 682, dy: -382 });
+        assert_at(&router, (683, 384), "center");
     }
 }

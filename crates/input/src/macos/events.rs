@@ -8,6 +8,32 @@ use kvm_protocol::{ButtonState, InputMessage, Key, MouseButton, PlatformKind};
 
 use crate::macos::keycode::keycode_to_key;
 
+/// Tags a `CGEvent` this process posted itself (e.g. an absolute
+/// cursor warp from `MacInject::set_cursor_position`), written into
+/// `EventField::EVENT_SOURCE_USER_DATA` — the documented mechanism for
+/// exactly this purpose. `CGEventTap` sees *all* mouse-moved events,
+/// including ones this same process synthesizes, so without this a
+/// programmatic warp gets captured right back as if it were real user
+/// motion.
+///
+/// **Found via real Mac->Windows hardware QA** (see ADR-0009's Update
+/// note): `Session`'s `RecenterLocal` handling warps the local cursor
+/// via `set_cursor_position` the moment ownership leaves `Local` --
+/// that warp was itself being captured as one huge `MouseMove` delta
+/// (the full jump from the pinned edge to the screen's center) and fed
+/// straight back into `Router`, which misapplied it to the *virtual*
+/// position it was tracking on the new target's screen, immediately
+/// bouncing ownership back. An arbitrary, distinctive nonzero constant
+/// -- real hardware essentially never sets this field.
+pub(crate) const SYNTHETIC_EVENT_MARKER: i64 = 0x004B_564D_5741_5250;
+
+/// Whether a captured `CGEvent` was posted by this same process (via
+/// [`SYNTHETIC_EVENT_MARKER`]) rather than originating from real
+/// hardware.
+fn is_our_own_synthetic_event(event: &CGEvent) -> bool {
+    event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == SYNTHETIC_EVENT_MARKER
+}
+
 /// Every event type [`crate::macos::MacCapture`] registers interest in.
 pub const CAPTURED_EVENT_TYPES: &[CGEventType] = &[
     CGEventType::KeyDown,
@@ -82,7 +108,15 @@ pub fn to_input_message(
         | CGEventType::RightMouseDragged
         | CGEventType::OtherMouseDragged => {
             let location = event.location();
-            let (dx, dy) = point_delta(last_position.replace(location), location);
+            let previous = last_position.replace(location);
+            if is_our_own_synthetic_event(event) {
+                // Still re-anchor `last_position` (above) so the *next*
+                // real event's delta is computed from where the warp
+                // actually landed -- just don't report this one as
+                // real user motion. See `SYNTHETIC_EVENT_MARKER`.
+                return None;
+            }
+            let (dx, dy) = point_delta(previous, location);
             Some(InputMessage::MouseMove { dx, dy })
         }
         CGEventType::LeftMouseDown => Some(InputMessage::MouseButton {
@@ -199,7 +233,74 @@ fn modifier_transition(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use core_graphics::event::CGMouseButton;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
     use super::*;
+
+    /// Constructs a real (unposted -- never actually injected, no
+    /// Accessibility permission needed) `MouseMoved` `CGEvent`, so
+    /// [`to_input_message`]'s marker-filtering can be exercised for
+    /// real instead of only through the pure [`point_delta`] helper.
+    fn mouse_moved_event(x: f64, y: f64, synthetic: bool) -> CGEvent {
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .expect("failed to create CGEventSource");
+        let event = CGEvent::new_mouse_event(
+            source,
+            CGEventType::MouseMoved,
+            CGPoint { x, y },
+            CGMouseButton::Left,
+        )
+        .expect("failed to create mouse-move CGEvent");
+        if synthetic {
+            event.set_integer_value_field(
+                EventField::EVENT_SOURCE_USER_DATA,
+                SYNTHETIC_EVENT_MARKER,
+            );
+        }
+        event
+    }
+
+    /// Regression test for a real Mac->Windows hardware QA finding (see
+    /// ADR-0009's Update note): `Session`'s local-cursor-recentering
+    /// warp was being captured by this same process's own listen-only
+    /// `CGEventTap` and fed back into position tracking as if it were
+    /// real user motion, since `CGEventTap` sees every mouse-moved
+    /// event including ones this process posts itself. A synthetic
+    /// event must produce no `InputMessage` at all.
+    #[test]
+    fn a_synthetic_self_posted_warp_event_produces_no_input_message() {
+        let mut last_flags = CGEventFlags::empty();
+        let mut last_position = None;
+        let event = mouse_moved_event(500.0, 400.0, true);
+        let message = to_input_message(
+            CGEventType::MouseMoved,
+            &event,
+            &mut last_flags,
+            &mut last_position,
+        );
+        assert_eq!(message, None);
+        // The position baseline must still update, so the *next* real
+        // event's delta is computed from where the warp actually
+        // landed, not some stale pre-warp location. (`CGPoint` has no
+        // `PartialEq`, so compare fields directly.)
+        let updated = last_position.expect("last_position must be set after any event");
+        assert_eq!((updated.x, updated.y), (500.0, 400.0));
+    }
+
+    #[test]
+    fn a_real_unmarked_event_still_produces_a_move() {
+        let mut last_flags = CGEventFlags::empty();
+        let mut last_position = Some(CGPoint { x: 490.0, y: 400.0 });
+        let event = mouse_moved_event(500.0, 400.0, false);
+        let message = to_input_message(
+            CGEventType::MouseMoved,
+            &event,
+            &mut last_flags,
+            &mut last_position,
+        );
+        assert_eq!(message, Some(InputMessage::MouseMove { dx: 10, dy: 0 }));
+    }
 
     #[test]
     fn first_reading_with_no_previous_position_reports_zero_motion() {

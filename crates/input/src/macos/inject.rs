@@ -152,6 +152,16 @@ impl PointerGeometry for MacInject {
         .map_err(|()| {
             InputError::InjectFailed("failed to create mouse-move CGEvent".to_string())
         })?;
+        // Tagged so our own listen-only CGEventTap (which sees every
+        // mouse-moved event, including ones this process posts itself)
+        // can recognize and skip this warp instead of feeding it back
+        // into position tracking as if it were real user motion -- see
+        // `crate::macos::events::SYNTHETIC_EVENT_MARKER` and ADR-0009's
+        // Update note for the real hardware bug this fixes.
+        cg_event.set_integer_value_field(
+            core_graphics::event::EventField::EVENT_SOURCE_USER_DATA,
+            crate::macos::events::SYNTHETIC_EVENT_MARKER,
+        );
         cg_event.post(CGEventTapLocation::HID);
         Ok(())
     }

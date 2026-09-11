@@ -645,6 +645,38 @@ real-OS-interaction fix in this ADR — verified by real-hardware retest,
 which this decision does not yet have. Phase 4 remains open until it
 does.
 
+**Update (2026-09-12): reverted. This class of fix is abandoned, not
+just this implementation.** The real-hardware retest of this decision
+found a *second* runaway-loop failure, distinct from decision 11's but
+the same underlying shape: the log showed the identical delta (e.g.
+`dx=74, dy=-85`) being sent to the target hundreds of times per second,
+continuously, for several seconds — not plausible as real physical
+input. Root cause, best understanding without further hardware access:
+repeatedly resetting the cursor to a fixed `anchor` while the user
+holds physical contact near an edge means each cycle's residual real
+motion, measured from that same just-reset anchor, looks like the same
+delta as the cycle before — so it never settles, and (unlike decision
+11's failure) doesn't need the warp API's "no event" guarantee to fail
+for this to happen; it's a property of the reset-and-remeasure
+strategy itself.
+
+Two independent implementations of "actively force the cursor back
+every time suppressed motion is observed" have now each produced a
+different runaway-loop failure. That is treated here as a finding
+about the *strategy*, not about which API implements it: a third
+attempt (a third warp mechanism, a rate limiter on the correction, a
+dead-zone around the anchor, etc.) is not pursued by this ADR. The
+decision-9 mechanisms (tap-drop + disassociation) revert to being the
+sole, standing implementation — exactly their decision-9/10 shape,
+confirmed again by this revert (`git diff` against the decision-9/10
+commit is empty for `capture.rs`/`events.rs`/`inject.rs`). The
+discrepancy between decision 9's ground-truth measurement (frozen)
+and later real-hardware reports (moving) remains open and unexplained;
+resolving it needs either a fundamentally different mechanism than
+"reset to an anchor," or clearer real-hardware reproduction steps that
+isolate exactly when the two disagree — not another variant of the
+same fix.
+
 ## Consequences
 
 - `crates/core` gains `layout.rs`, `ownership.rs`, `router.rs`,

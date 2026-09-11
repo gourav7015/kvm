@@ -119,28 +119,25 @@ channels. Platform-specific code is confined to backend modules inside
   a DoD violation: UDP broadcast events aren't deduplicated by `device_id`
   at the crate level — a future `core` device list will need to do that.
 
-- Phase 3 (input engine, macOS↔Windows target pair) — **🟡 real
-  Mac↔Windows hardware QA completed 2026-09-10/11; both translation
-  directions now confirmed working, but this phase is not closed** —
-  Windows UAC/elevated-window behavior remains untestable on this
-  session's Windows machine specifically (its logged-in account is the
-  built-in Administrator account, which is exempt from UAC's
-  split-token model entirely — there's no unelevated state available on
-  it to test against; needs a standard user account elsewhere). Two real
-  issues were found and fixed during this QA pass: (1) `commit 8266c24`
-  — `translate_for_target` was correct and unit-tested but never wired
-  into the live inject path; (2) `commit 0c75c78` — macOS never captured
-  a bare modifier key press at all (reported as `FlagsChanged`, which
-  the capture backend dropped unconditionally), blocking Mac→Windows
-  Command→Control translation; fixed by diffing modifier flags across
-  events, confirmed on real hardware (`docs/manual-qa/phase-3-input.md`).
-  Real shortcut combinations (Cmd+A/X/V on the Mac landing as Ctrl+A/X/V
-  on Windows) are confirmed working too — each key, modifier or not, is
-  captured and injected as its own independently-ordered event, and the
-  receiving OS's own keyboard state tracking reconstructs the
-  combination correctly; no protocol change for "concurrently held
-  modifiers" turned out to be needed. `protocol` gained a normalized
-  `Key`/`PlatformKind`
+- Phase 3 (input engine, macOS↔Windows target pair) — **🟢 CLOSED.** Real
+  Mac↔Windows hardware QA completed 2026-09-10/11
+  (`docs/manual-qa/phase-3-input.md`): keyboard, mouse, Accessibility
+  permission handling, modifier translation in both directions
+  (including real shortcut combinations — Cmd+A/X/V on the Mac landing
+  as Ctrl+A/X/V on Windows, each key captured and injected as its own
+  independently-ordered event with no protocol change needed), latency,
+  and Windows UAC/elevated-window behavior are all confirmed PASS. Two
+  real bugs were found and fixed during this QA pass, not glossed over:
+  (1) `commit 8266c24` — `translate_for_target` was correct and
+  unit-tested but never wired into the live inject path; (2) `commit
+  0c75c78` — macOS never captured a bare modifier key press at all
+  (reported as `FlagsChanged`, dropped unconditionally by the capture
+  backend), blocking Mac→Windows Command→Control translation until
+  fixed by diffing modifier flags across events. The UAC test was
+  initially blocked by the test machine's account being the Windows
+  built-in Administrator (exempt from UAC's split-token model); resolved
+  by creating a genuine standard user account and retesting for real.
+  `protocol` gained a normalized `Key`/`PlatformKind`
   instead of a raw OS keycode; `input` gained the `Capture`/`Inject`
   trait boundary, a pure OS-independent modifier-translation function
   (the killer feature: Command↔Control swap only when exactly one side
@@ -190,7 +187,7 @@ Mac→Windows translation until fixed.
 | macOS mouse capture/injection (move, left/right/middle click, scroll) | ✅ PASS |
 | Windows keyboard capture/injection (letters, digits, Enter/Tab/Backspace/Escape/Space, arrows, F1–F5, all modifiers) | ✅ PASS |
 | Windows mouse capture/injection (move, left/right/middle click, scroll) | ✅ PASS |
-| Windows UAC/elevated-window behavior | ⬜ OPEN — this session's Windows machine is logged in as the built-in Administrator account (exempt from UAC's split-token model), so there is no unelevated state to test against on it at all; needs a standard user account with UAC active |
+| Windows UAC/elevated-window behavior | ✅ PASS — tested under a genuine standard user account (the original account was the exempt built-in Administrator); an unelevated relay correctly failed to inject into an elevated Notepad window, with no crash and no bypass attempted |
 | **Control (Windows) → Command (Mac) translation** | ✅ PASS — confirmed with reproducible log evidence (real Ctrl+A on Windows executed as Cmd+A on the Mac) |
 | **Command (Mac) → Control (Windows) translation** | ✅ PASS (after the `FlagsChanged` fix) — confirmed with reproducible log evidence (real bare Command press on the Mac captured, translated to `ControlLeft`, and injected on Windows) |
 | Option↔Alt never translates | ✅ PASS, both directions |

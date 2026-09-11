@@ -170,23 +170,36 @@ sites; regression test added at `core`'s layer
 
 ## 4. Windows UAC / elevated-window behavior
 
-**OPEN — cannot be tested on this specific machine/account.** Every
-Command Prompt window on this Windows machine shows "Administrator:" in
-its title bar regardless of how it's launched — including one opened
-with no "Run as administrator" request at all. This means the logged-in
-account is the Windows **built-in Administrator account**, which is
-specifically exempt from UAC's Admin Approval Mode / split-token model:
-every process this account runs already carries the full administrator
-token, with no unelevated state to compare against. The intended
-test — an unelevated relay process failing to inject into a genuinely
-higher-integrity window — has no unelevated context available to set up
-on this machine at all. This is a property of the test environment, not
-something more attempts would resolve.
+**PASS.** Initially blocked on this machine: every Command Prompt
+window showed "Administrator:" regardless of how it was launched,
+because the logged-in account was the Windows **built-in Administrator
+account**, which is exempt from UAC's Admin Approval Mode / split-token
+model entirely — every process it runs already carries the full
+administrator token, with no unelevated state to test against.
 
-To actually close this item, the relay needs to run under a **standard
-(non-built-in-Administrator) user account** with UAC's Admin Approval
-Mode active, on a different machine or account than the one used for
-this QA session.
+Resolved by creating a genuine **standard user account** (`test`) on the
+same machine and re-running the relay from there:
+
+- The relay (`input_relay.exe listen`), run from a plain `cmd.exe`
+  opened normally, showed **no** "Administrator:" in its title bar —
+  confirmed unelevated.
+- A second window opened via right-click → "Run as administrator"
+  correctly prompted for elevation (proving this account has real UAC
+  behavior, unlike the built-in Administrator account) and showed
+  "Administrator: Notepad" once approved.
+- With that elevated Notepad focused, typing on the Mac's physical
+  keyboard produced **no text in Notepad** — the keystrokes were instead
+  picked up by the unelevated console window running the relay (the only
+  window at a privilege level the unelevated injecting process can
+  actually reach).
+
+This is exactly the expected behavior per ADR-0007 §5: `SendInput` from
+an unelevated process cannot deliver input to a higher-integrity window,
+and this code makes no attempt to work around that restriction. No crash
+or error on either side — the relay process kept running normally
+throughout.
+
+- [x] PASS: elevated foreground window did not receive injected input, as expected; the relay process did not crash or hang
 
 - [ ] OPEN: needs a standard user account with UAC active; not available on this session's Windows machine
 

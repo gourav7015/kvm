@@ -281,6 +281,24 @@ impl Router {
                 "edge crossed but no configured/connected neighbor -- staying put and clamping"
             );
             self.clamp_position_into_active_screen();
+            // Real-hardware regression (Mac<->Windows pointer-range QA):
+            // `clamp_position_into_active_screen` only ever updated
+            // `self.position` -- `self.state`'s own embedded
+            // `virtual_cursor` (whichever value was there from the last
+            // actual switch) was left stale, silently violating this
+            // module's own documented invariant that `state()` and
+            // `self.position` never disagree (see `nudge_off_boundary`'s
+            // call site). Nothing in this file's *behavior* happened to
+            // read the stale copy, but `state()` is a public, trusted
+            // accessor other code (and this exact class of test) relies
+            // on to reflect where the pointer actually is -- keep it in
+            // sync here too, not just at switch time.
+            if let OwnershipState::Forwarding { target, .. } = self.state {
+                self.state = OwnershipState::Forwarding {
+                    target,
+                    virtual_cursor: self.position,
+                };
+            }
             return self
                 .route(InputMessage::MouseMove { dx, dy })
                 .into_iter()
@@ -879,6 +897,69 @@ mod tests {
                 .any(|e| matches!(e, Effect::RecenterLocal { .. })),
             "an onward hop between two remote targets must not recenter \
              our own local cursor again, got {onward:?}"
+        );
+    }
+
+    /// Regression test for the real Mac<->Windows "can't reliably reach
+    /// the edges of the target screen" hardware report: on an edge with
+    /// no configured further neighbor (a dead end from the target's own
+    /// perspective -- e.g. `NEIGHBOR`'s Top/Right/Bottom in a two-device
+    /// layout, since only its Left points back to `US`), `Router`'s own
+    /// tracked position must clamp to the *exact* true boundary
+    /// (`width-1`/`height-1`/`0`), not stop short of it. The message
+    /// actually forwarded to the target carries the real captured delta
+    /// unmodified (the target's own `SetCursorPos` independently clamps
+    /// to its real screen bounds -- see `WindowsInject`), but `Router`'s
+    /// own state must agree with that true edge exactly, since it is
+    /// what later decides whether a *further* push crosses into a
+    /// neighbor on that edge.
+    #[test]
+    fn staying_put_at_a_dead_edge_clamps_the_tracked_position_to_the_exact_true_boundary() {
+        let mut router = router_with_right_neighbor();
+        router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
+        assert!(matches!(
+            router.state(),
+            OwnershipState::Forwarding {
+                target: NEIGHBOR,
+                ..
+            }
+        ));
+
+        // Push far past NEIGHBOR's own Right edge (1000-wide screen, no
+        // neighbor configured there) -- must clamp to exactly 999, not
+        // some value short of the true boundary.
+        router.handle_captured(InputMessage::MouseMove { dx: 5000, dy: 0 });
+        assert_eq!(
+            router.state(),
+            OwnershipState::Forwarding {
+                target: NEIGHBOR,
+                virtual_cursor: (999, 400),
+            },
+            "must clamp to the exact true right edge (width-1), not short of it"
+        );
+
+        // Push far past the Top edge (no neighbor configured) -- must
+        // clamp to exactly 0.
+        router.handle_captured(InputMessage::MouseMove { dx: 0, dy: -5000 });
+        assert_eq!(
+            router.state(),
+            OwnershipState::Forwarding {
+                target: NEIGHBOR,
+                virtual_cursor: (999, 0),
+            },
+            "must clamp to the exact true top edge (0), not short of it"
+        );
+
+        // Push far past the Bottom edge (no neighbor configured) --
+        // must clamp to exactly 799 (height-1).
+        router.handle_captured(InputMessage::MouseMove { dx: 0, dy: 5000 });
+        assert_eq!(
+            router.state(),
+            OwnershipState::Forwarding {
+                target: NEIGHBOR,
+                virtual_cursor: (999, 799),
+            },
+            "must clamp to the exact true bottom edge (height-1), not short of it"
         );
     }
 }

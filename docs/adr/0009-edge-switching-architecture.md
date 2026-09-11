@@ -402,6 +402,71 @@ function. Verified instead by the direct runtime evidence above (for
 the macOS side) and by real-hardware retest against this fix (for the
 Windows side) — see `docs/manual-qa/phase-4-edge-switching.md`.
 
+### 11. Fourth real-hardware round: decision 10's conclusion was incomplete on both counts
+
+**Update (2026-09-11, fourth round):** a further real-hardware retest
+directly contradicted half of decision 10's conclusion: the physical
+Mac cursor was reported still visibly moving during `Forwarding`
+(despite the independent `CGEvent::location()` measurement showing it
+frozen), and the Windows cursor still could not reach all four
+corners (despite the DPI-awareness fix and a perfectly-matching
+`GetCursorPos`/`SetCursorPos` trace). Two more real, distinct issues
+were found and fixed as a result — not by discarding decision 10's
+evidence, but by treating both signals (the measurement *and* the
+human report) as real and looking for what could make both true at
+once.
+
+**`Router` state/position desync at a dead edge (a genuine bug, caught
+by a new pure unit test).** `clamp_position_into_active_screen`
+(called when a captured edge crossing has no configured/connected
+neighbor to switch to) always correctly clamped `self.position` to the
+exact true boundary — but never updated `self.state`'s own embedded
+`Forwarding { virtual_cursor, .. }` copy to match, silently violating
+this module's own documented invariant ("`state()`/`self.position`
+never disagree," established when decision on nudge-off-boundary was
+made). No behavioral code path in this file happens to read the stale
+copy computationally (`crossed_edge`/`route` both read `self.position`
+directly), but `state()` is the trusted, public accessor this exact
+class of regression test — and potentially future callers — rely on
+to reflect where the pointer actually is. Fixed in
+`Router::handle_mouse_move`'s dead-edge branch by re-deriving
+`self.state`'s `virtual_cursor` from the freshly-clamped `self.position`
+before returning. New regression test:
+`staying_put_at_a_dead_edge_clamps_the_tracked_position_to_the_exact_true_boundary`,
+which failed before the fix (asserting `state()` reached exactly
+`width-1`/`0`/`height-1` at a dead Top/Right/Bottom edge, and instead
+found it frozen at the stale pre-clamp value) and passes after.
+
+**macOS suppression gained a third, active layer.** The disassociation
+mechanism from decision 9's Update was measured working via
+`CGEvent::location()` — the same call the WindowServer itself renders
+from — yet a live human observer reported the cursor still moving in
+the same session shape. Rather than pick one signal as wrong, both are
+now defended against: `MacCapture` snapshots the real cursor position
+the instant suppression begins (`anchor`), and on every subsequent
+`MouseMoved`/`*Dragged` event observed while still suppressed, actively
+calls `CGDisplay::warp_mouse_cursor_position(anchor)` to force the
+cursor back — regardless of whether disassociation alone actually held
+it there on this macOS version or this specific input path (trackpad
+vs. mouse-driven cursor rendering are documented to sometimes differ
+in how faithfully they honor
+`CGAssociateMouseAndMouseCursorPosition`, a plausible explanation for
+the discrepancy, though not confirmed). `CGWarpMouseCursorPosition` is
+documented to move the cursor without generating a new event, so this
+cannot recurse into the tap callback. This required `last_position`
+(previously a thread-local `Cell`, since only the capture callback
+touched it) to become an `Arc<Mutex<..>>` field on `MacCapture`, since
+`set_local_suppression` (called from a different thread) now needs to
+read it to seed `anchor`.
+
+**Both fixes are additive, defense-in-depth layers — nothing from
+decisions 9/10 was removed.** The DPI-awareness fix, the disassociation
+toggle, and the tap-drop mechanism all remain exactly as they were;
+this decision adds a state-consistency fix (pure logic, unit-tested)
+and an active enforcement layer (real OS interaction, verified by
+real-hardware retest) on top. Phase 4 remains open until that retest
+confirms both symptoms are actually gone.
+
 ## Consequences
 
 - `crates/core` gains `layout.rs`, `ownership.rs`, `router.rs`,

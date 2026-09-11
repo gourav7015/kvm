@@ -1,10 +1,15 @@
 //! Manual cross-machine input test for Phase 3's macOS<->Windows target
-//! pair. Not run by `cargo test` — run by hand on two real machines, one
-//! on each side of a real desk, per `docs/manual-qa/phase-3-input.md`.
+//! pair and Phase 3b's Linux/X11 backend. Not run by `cargo test` — run
+//! by hand on two real machines, one on each side of a real desk, per
+//! `docs/manual-qa/phase-3-input.md` (macOS/Windows) and
+//! `docs/manual-qa/phase-3b-linux-input.md` (Linux/X11).
 //!
-//! Not built at all on Linux (no `Capture`/`Inject` backend yet — see
-//! ADR-0007 §6); `cargo build --workspace --all-targets` still succeeds
-//! there via the stub `main` below.
+//! On a Linux machine, this only works under a real X11 session — see
+//! ADR-0008 for why there's no Wayland backend. Building on any other
+//! target (or a Linux target with no `Capture`/`Inject` backend, i.e.
+//! anything except macOS/Windows/Linux) still succeeds via the stub
+//! `main` below, so `cargo build --workspace --all-targets` stays green
+//! everywhere.
 //!
 //! ## Usage
 //!
@@ -39,7 +44,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 mod real {
     use std::env;
     use std::net::{Ipv4Addr, SocketAddr};
@@ -56,11 +61,28 @@ mod real {
     use kvm_input::{MacCapture as LocalCapture, MacInject as LocalInject};
     #[cfg(windows)]
     use kvm_input::{WindowsCapture as LocalCapture, WindowsInject as LocalInject};
+    #[cfg(target_os = "linux")]
+    use kvm_input::{X11Capture as LocalCapture, X11Inject as LocalInject};
 
     #[cfg(target_os = "macos")]
     const LOCAL_PLATFORM: PlatformKind = PlatformKind::MacOs;
     #[cfg(windows)]
     const LOCAL_PLATFORM: PlatformKind = PlatformKind::Windows;
+    #[cfg(target_os = "linux")]
+    const LOCAL_PLATFORM: PlatformKind = PlatformKind::Linux;
+
+    /// Unlike `MacInject`/`WindowsInject` (infallible `Default`),
+    /// `X11Inject::new()` connects to the X server immediately and can
+    /// fail — this wrapper keeps that one difference from leaking into
+    /// `run_listener`'s otherwise-identical body.
+    #[cfg(any(target_os = "macos", windows))]
+    fn new_inject() -> LocalInject {
+        LocalInject::new()
+    }
+    #[cfg(target_os = "linux")]
+    fn new_inject() -> LocalInject {
+        LocalInject::new().expect("failed to connect to the X server for injection")
+    }
 
     const SEED_LISTENER: [u8; 32] = [0xCC; 32];
     const SEED_CONNECTOR: [u8; 32] = [0xDD; 32];
@@ -170,7 +192,7 @@ mod real {
 
         measure_round_trip(&mut peer, false).await;
 
-        let mut inject = LocalInject::new();
+        let mut inject = new_inject();
         println!("injecting incoming input events (Ctrl+C here to stop)...");
         loop {
             match peer.streams.input.recv().await {
@@ -224,16 +246,16 @@ mod real {
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 #[tokio::main]
 async fn main() {
     real::run().await;
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 fn main() {
     eprintln!(
         "input_relay: no Capture/Inject backend on this OS yet \
-         (Linux is deferred to the Phase 3b X11/Wayland spike — see ADR-0007 §6). Nothing to run."
+         (see ADR-0007 and ADR-0008 for what's supported). Nothing to run."
     );
 }

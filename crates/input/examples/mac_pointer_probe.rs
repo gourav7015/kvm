@@ -4,6 +4,14 @@
 //! HYPOTHESIS B for the "Windows cursor is boxed into the middle"
 //! real-hardware failure.
 //!
+//! **This probe has served its purpose — it confirmed HYPOTHESIS A on
+//! real hardware (2026-09-12), and ADR-0009 decision 17 records the
+//! measurement and the fix.** It is kept because it is the tool that
+//! verifies the fix still holds: re-run it after any change to macOS
+//! capture and `samples_with_zero_point_delta_but_real_hid_delta`
+//! shows, per event, whether the location-derived reading is being
+//! relied on anywhere it shouldn't be.
+//!
 //! - **A**: the Mac's captured event *locations* are bounded by the Mac
 //!   screen, so the point deltas this project derives from them stop
 //!   representing continued physical movement.
@@ -18,9 +26,8 @@
 //! did the pointer just move":
 //!
 //! 1. `CGEvent::location()` diffed against the previous reading — the
-//!    absolute-position-derived delta [`kvm_input`]'s
-//!    `macos::events::point_delta` actually computes and ships as
-//!    `InputMessage::MouseMove`.
+//!    absolute-position-derived delta this backend used to compute and
+//!    ship as `InputMessage::MouseMove`, before ADR-0009 decision 17.
 //! 2. `kCGMouseEventDeltaX`/`kCGMouseEventDeltaY` (`EventField::MOUSE_EVENT_DELTA_X/Y`)
 //!    — the event's own relative motion fields, which come from the HID
 //!    layer and are *not* a function of any screen position.

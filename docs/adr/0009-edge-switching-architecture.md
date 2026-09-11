@@ -856,3 +856,121 @@ story.
   been physically tested as of this ADR's acceptance; a third machine
   is needed to demonstrate the star/cross topology the Phase 4 kickoff
   described.
+
+### 17. Root cause of the pointer-range failure, measured: `CGEvent::location()` is clamped by the Mac display, so the delta derived from it dies at the screen edge
+
+**Update (2026-09-12):** the Windows pointer-range failure is fixed.
+The root cause is in the macOS capture layer and was measured
+directly, not inferred.
+
+**Decision 16's last update was wrong**, and this supersedes it. It
+attributed the tracked `virtual_cursor` never exceeding ~742 of a
+possible 1365 to "a single continuous trackpad swipe simply not
+covering that much physical travel distance — not a software cap." A
+retest with a deliberately long swipe disproved that: ~4537 px of
+cumulative physical travel, more than three times the Windows screen
+width, still pinned tracked x at exactly 744, held there for 114 of
+~1263 samples. The cap is real.
+
+**The measurement.** `crates/input/examples/mac_pointer_probe.rs` taps
+the same events `MacCapture` taps and records, per event, both
+independent readings of the motion it represents: the delta derived by
+diffing successive `CGEvent::location()` readings (what this backend
+shipped), and the event's own `kCGMouseEventDeltaX/Y` fields. Run under
+`--suppress`, which reproduces a real `Forwarding` session (recentre,
+disassociate, drop motion events), on macOS 26.6.2 with a 1470x956
+display:
+
+```
+seq   t_ms   loc_x    loc_y   point_dx  point_dy   hid_dx  hid_dy
+84    1682   1455.0   416.7        102       -12      102     -12
+85    1690   1470.0   411.4         15        -5      104      -5
+86    1698   1470.0   411.4          0         0      102       0
+87    1709   1470.0   411.4          0         0       44       0
+88    1715   1470.0   411.4          0         0       89       0
+89    1723   1470.0   411.4          0         0       75       0
+```
+
+`loc_x` pins at exactly 1470.0 and never changes again for the rest of
+the run; the location-derived delta collapses to 0; the event's own
+delta fields go on reporting 102, 44, 89, 75 points of real physical
+movement. Identical on the vertical axis (sample 313 pins at y=956.0,
+samples 314-320 report real `hid_dy` against `point_dy` of 0). The
+movement is destroyed at the first stage of the pipeline, so no later
+stage — router, session, QUIC, Windows injection — could possibly
+recover it. Every one of those stages was, and is, behaving correctly;
+decision 16's conclusion that the Windows coordinate mapping contains
+no defect stands.
+
+**The quantitative signature also matches exactly.** `RecenterLocal`
+warps the local cursor to the screen centre (735, 478) on leaving
+`Local`, and a Right-edge crossing lands the remote cursor at x=5. If
+`location()` is bounded by the display, the largest rightward advance
+one uninterrupted swipe can express is `1469 - 735 = 734` points,
+putting the reachable ceiling at ~739. Observed: 744. The vertical
+bound of ±478 out of 768 is the "cannot reach top or bottom" half of
+the report. "Boxed into the middle" is precisely a `±735 x ±478` box
+around the entry point — the Mac's own screen size, projected onto the
+Windows screen.
+
+**Disassociation was never the mechanism.** A separate probe
+established that `CGAssociateMouseAndMouseCursorPosition(false)` does
+not freeze `location()` at all: it stops the cursor being *drawn*
+while the underlying position keeps tracking HID motion and keeps
+clamping at the display bounds. This matters because it explains why
+the remote cursor moved ~734 points before stopping rather than never
+moving, and it retires the competing "the reading is frozen" theory.
+(The same probe found that a *posted* `CGEvent` with an out-of-bounds
+location is not clamped — only the pointer-position path clamps — so
+this codebase's own `CGEventPost`-based warps are unaffected.)
+
+**The fix: read motion from the event's motion fields.** `events.rs`'s
+mouse-motion arm now reads `kCGMouseEventDeltaX/Y` via the new
+`mouse_delta` helper instead of diffing `location()`. The delta fields
+describe motion rather than position, so they carry no screen bound and
+stay correct with the pointer parked against a boundary.
+
+This is a one-line change in behaviour and it is in the OS layer only —
+`router.rs`, `ownership.rs`, `session.rs`, the protocol and the
+transport are untouched, as is every other backend. Nothing was added
+to compensate for the old behaviour: no scaling, no offsets, no
+constants, no sleeps, and in particular no cursor re-warping (the
+class of fix decisions 11 and 13 each tried and each reverted for
+runaway feedback loops — it is still abandoned, and this fix does not
+revisit it).
+
+**The premise that caused the bug, disproven by the same data.** The
+previous revision deliberately moved *away* from these fields, its doc
+comment asserting they are "raw, pre-acceleration-curve HID counts —
+not screen-point distances." The measurement shows the opposite: while
+the pointer is free to move, the two readings are *the same number*
+across the full speed range (samples 49-84: 9, 17, 23, 30, 32, 64, 84,
+94, 102 points/event, agreeing exactly, ±1 from rounding). They are
+already screen-point deltas with macOS's pointer-acceleration curve
+applied. The earlier claim was never measured; it is what created this
+bug, and it is why `mouse_delta`'s doc comment now carries the evidence
+rather than an assertion.
+
+**Cross-event position state is gone entirely.** Each event's motion is
+now self-contained, so `to_input_message` no longer takes a
+`last_position`, `point_delta` is deleted, and `MacCapture`'s
+per-session `last_position` `Cell` is removed. This also simplifies the
+`SYNTHETIC_EVENT_MARKER` filter (decision 5): a self-posted warp
+previously had to re-anchor the position baseline so the *next* real
+event's delta wasn't computed from a stale pre-warp location — now it
+is simply not reported, and cannot affect any later event. That
+filtering, `RecenterLocal`, local suppression, the thread-affinity
+association handling (decision 14) and every disconnect-safety path
+(decisions 11/12) are otherwise unchanged.
+
+**Regression test, at the lowest layer that can reproduce the failure**:
+`motion_is_still_reported_when_the_pointer_is_clamped_at_the_screen_edge`
+in `events.rs` builds real (unposted) `CGEvent`s at an identical,
+clamped location — using the literal `hid_dx` values 102, 44, 89, 75
+from real hardware samples 86-89 — and asserts the real motion is
+reported. It fails against the old implementation, which reports 0 for
+every one. Companions cover the vertical clamp, drag events, a
+genuinely stationary pointer (the fix must not manufacture motion), and
+a synthetic warp not disturbing the next real event's delta.
+
+**Open**: real Mac->Windows hardware acceptance of the full round trip.

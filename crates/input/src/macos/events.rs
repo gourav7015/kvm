@@ -3,7 +3,6 @@
 //! conversion, no cross-platform logic.
 
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventType, EventField};
-use core_graphics::geometry::CGPoint;
 use kvm_protocol::{ButtonState, InputMessage, Key, MouseButton, PlatformKind};
 
 use crate::macos::keycode::keycode_to_key;
@@ -57,21 +56,16 @@ pub const CAPTURED_EVENT_TYPES: &[CGEventType] = &[
 /// `FlagsChanged` transition that can't be disambiguated — see
 /// [`modifier_transition`]).
 ///
-/// `last_flags` and `last_position` carry state across calls within one
-/// capture session (owned by the caller — see [`crate::macos::capture`]
-/// — and expected to start at [`CGEventFlags::empty`]/`None`
-/// respectively each time capture (re)starts): `last_flags` because a
-/// `FlagsChanged` event only reports the *current* combined flags, not
-/// which direction the specific key that triggered it just moved;
-/// `last_position` because a mouse-move event's delta fields
-/// (`kCGMouseEventDeltaX/Y`) are raw, pre-acceleration-curve HID counts
-/// — not screen-point distances — and this project's `InputMessage::MouseMove`
-/// contract is a screen-point delta (see [`point_delta`]).
+/// `last_flags` carries state across calls within one capture session
+/// (owned by the caller — see [`crate::macos::capture`] — and expected
+/// to start at [`CGEventFlags::empty`] each time capture (re)starts),
+/// because a `FlagsChanged` event only reports the *current* combined
+/// flags, not which direction the specific key that triggered it just
+/// moved. Mouse motion needs no such state: see [`mouse_delta`].
 pub fn to_input_message(
     event_type: CGEventType,
     event: &CGEvent,
     last_flags: &mut CGEventFlags,
-    last_position: &mut Option<CGPoint>,
 ) -> Option<InputMessage> {
     match event_type {
         CGEventType::KeyDown | CGEventType::KeyUp => {
@@ -107,47 +101,30 @@ pub fn to_input_message(
         | CGEventType::LeftMouseDragged
         | CGEventType::RightMouseDragged
         | CGEventType::OtherMouseDragged => {
-            let location = event.location();
-            let previous = last_position.replace(location);
             if is_our_own_synthetic_event(event) {
-                // Still re-anchor `last_position` (above) so the *next*
-                // real event's delta is computed from where the warp
-                // actually landed -- just don't report this one as
-                // real user motion. See `SYNTHETIC_EVENT_MARKER`.
+                // See `SYNTHETIC_EVENT_MARKER`. Nothing to re-anchor:
+                // each event's motion is now self-contained, so a warp
+                // this process posted simply isn't reported, with no
+                // effect on how the next real event is interpreted.
                 return None;
             }
-            let (dx, dy) = point_delta(previous, location);
-            // DIAGNOSTIC (Phase 4 pointer-range root-cause hunt): the
-            // first stage of the "follow one physical movement through
-            // the whole pipeline" trace. Logs both independent readings
-            // of how far the pointer just moved, side by side:
-            //
-            //   `location`/`dx`/`dy` -- the absolute-position-derived
-            //   delta this backend actually ships (see `point_delta`).
-            //
-            //   `hid_dx`/`hid_dy` -- `kCGMouseEventDeltaX/Y`, the
-            //   event's own relative motion fields, which come from the
-            //   HID layer and are not a function of any screen position.
-            //
-            // These two agreeing means the Mac is reporting movement
-            // faithfully and any loss is downstream. `dx`/`dy` going to
-            // zero while `hid_dx`/`hid_dy` keep reporting real motion
-            // means the movement is already gone by this line -- nothing
-            // further down the pipeline could then possibly recover it.
-            // Read alongside `crates/input/examples/mac_pointer_probe.rs`,
-            // which measures the same thing standalone.
-            let hid_dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X);
-            let hid_dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y);
+            let (dx, dy) = mouse_delta(event);
+            // Stage 1 of the "follow one physical movement through the
+            // whole pipeline" trace (stages 2-4: `core::router`,
+            // `core::session`, `windows::inject`). `location` is logged
+            // alongside the delta purely as the diagnostic that made
+            // this bug visible -- once the pointer is pushed past the
+            // Mac's own display bounds, `location` pins at the boundary
+            // while `dx`/`dy` keep reporting real motion. They are now
+            // independent readings; before the fix below, they weren't.
+            let location = event.location();
             tracing::debug!(
                 stage = "1-capture",
                 loc_x = location.x,
                 loc_y = location.y,
                 dx,
                 dy,
-                hid_dx,
-                hid_dy,
-                point_delta_lost_real_motion = (dx == 0 && dy == 0) && (hid_dx != 0 || hid_dy != 0),
-                "macOS capture: CGEvent location and the delta derived from it"
+                "macOS capture: mouse motion"
             );
             Some(InputMessage::MouseMove { dx, dy })
         }
@@ -186,25 +163,38 @@ pub fn to_input_message(
     }
 }
 
-/// The screen-point delta between two absolute cursor readings, or
-/// `(0, 0)` if there's no previous reading yet (the very first
-/// mouse-move event seen since capture started — nothing to diff
-/// against, and reporting a large one-off jump from an arbitrary origin
-/// would be worse than reporting no motion for that single event).
+/// How far this mouse-motion event says the pointer moved, read from
+/// the event's own `kCGMouseEventDeltaX`/`kCGMouseEventDeltaY` fields.
 ///
-/// Pure and `CGEvent`-independent so it's fully unit-testable — the
-/// surrounding `CGEvent::location()` call in [`to_input_message`] is
-/// the actual "thin shim" piece (see ADR-0007/ADR-0009). Sub-point
-/// motion is rounded to the nearest whole point, matching the whole-unit
-/// `InputMessage::MouseMove` contract every other platform already uses.
-fn point_delta(previous: Option<CGPoint>, current: CGPoint) -> (i32, i32) {
-    match previous {
-        Some(previous) => (
-            (current.x - previous.x).round() as i32,
-            (current.y - previous.y).round() as i32,
-        ),
-        None => (0, 0),
-    }
+/// **This must not be derived from `CGEvent::location()` instead** —
+/// that was the cause of the Phase 4 "the remote cursor is boxed into
+/// the middle of the screen" failure, and ADR-0009 decision 17 records
+/// the measurement. `location()` is an *absolute screen coordinate*,
+/// clamped by the WindowServer to this Mac's own display. Once the user
+/// pushes the pointer past that boundary — which a `Forwarding` session
+/// does constantly, since the whole point is to keep moving after the
+/// local screen runs out — successive readings are identical, so a
+/// delta diffed from them is `0` forever after, no matter how far the
+/// hand actually travels. Disassociating the cursor does not help: it
+/// stops the cursor being *drawn*, while the underlying position keeps
+/// tracking HID motion and keeps clamping.
+///
+/// The delta fields carry no such bound: they describe motion, not
+/// position, so they stay correct with the pointer parked against a
+/// boundary. Measured on real hardware (2026-09-12, macOS 26.6.2,
+/// 1470x956): while the pointer was free to move, these fields and the
+/// location-derived delta agreed *exactly* across the full speed range
+/// (9, 17, 23, 30, 64, 94, 102 points/event); the instant `location()`
+/// pinned at 1470.0 the location-derived delta collapsed to 0 while
+/// these fields went on reporting 102, 44, 89, 75. They are already
+/// screen-point deltas with macOS's pointer-acceleration curve applied
+/// — *not* raw pre-acceleration HID counts, as an earlier revision of
+/// this file asserted without measuring.
+fn mouse_delta(event: &CGEvent) -> (i32, i32) {
+    (
+        event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X) as i32,
+        event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y) as i32,
+    )
 }
 
 /// The `CGEventFlags` bit that tracks whether *any* key in `key`'s
@@ -267,6 +257,7 @@ fn modifier_transition(
 mod tests {
     use core_graphics::event::CGMouseButton;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::geometry::CGPoint;
 
     use super::*;
 
@@ -275,6 +266,23 @@ mod tests {
     /// [`to_input_message`]'s marker-filtering can be exercised for
     /// real instead of only through the pure [`point_delta`] helper.
     fn mouse_moved_event(x: f64, y: f64, synthetic: bool) -> CGEvent {
+        mouse_moved_event_with_delta(x, y, 0, 0, synthetic)
+    }
+
+    /// As [`mouse_moved_event`], but also sets the event's own motion
+    /// fields — the pair that matters is `(x, y)` (where the OS says the
+    /// pointer *is*) versus `(delta_x, delta_y)` (how far it just
+    /// *moved*). Real hardware drives these independently: once the
+    /// pointer is clamped against a display boundary the position stops
+    /// changing while the deltas keep reporting motion, which is exactly
+    /// the case these tests need to construct.
+    fn mouse_moved_event_with_delta(
+        x: f64,
+        y: f64,
+        delta_x: i64,
+        delta_y: i64,
+        synthetic: bool,
+    ) -> CGEvent {
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .expect("failed to create CGEventSource");
         let event = CGEvent::new_mouse_event(
@@ -284,6 +292,8 @@ mod tests {
             CGMouseButton::Left,
         )
         .expect("failed to create mouse-move CGEvent");
+        event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, delta_x);
+        event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, delta_y);
         if synthetic {
             event.set_integer_value_field(
                 EventField::EVENT_SOURCE_USER_DATA,
@@ -303,73 +313,122 @@ mod tests {
     #[test]
     fn a_synthetic_self_posted_warp_event_produces_no_input_message() {
         let mut last_flags = CGEventFlags::empty();
-        let mut last_position = None;
         let event = mouse_moved_event(500.0, 400.0, true);
-        let message = to_input_message(
-            CGEventType::MouseMoved,
-            &event,
-            &mut last_flags,
-            &mut last_position,
-        );
+        let message = to_input_message(CGEventType::MouseMoved, &event, &mut last_flags);
         assert_eq!(message, None);
-        // The position baseline must still update, so the *next* real
-        // event's delta is computed from where the warp actually
-        // landed, not some stale pre-warp location. (`CGPoint` has no
-        // `PartialEq`, so compare fields directly.)
-        let updated = last_position.expect("last_position must be set after any event");
-        assert_eq!((updated.x, updated.y), (500.0, 400.0));
+    }
+
+    /// A warp this process posts is filtered by its marker, and — unlike
+    /// the previous absolute-position-diffing implementation — cannot
+    /// affect how the *next* real event is interpreted either, because
+    /// each event now carries its own motion. This is what removed the
+    /// need for any cross-event position state at all.
+    #[test]
+    fn a_synthetic_warp_does_not_disturb_the_next_real_events_delta() {
+        let mut last_flags = CGEventFlags::empty();
+        let warp = mouse_moved_event_with_delta(1200.0, 900.0, 0, 0, true);
+        assert_eq!(
+            to_input_message(CGEventType::MouseMoved, &warp, &mut last_flags),
+            None
+        );
+        // A real event right after the warp, from a completely
+        // different location, still reports exactly its own motion.
+        let real = mouse_moved_event_with_delta(300.0, 200.0, 7, -4, false);
+        assert_eq!(
+            to_input_message(CGEventType::MouseMoved, &real, &mut last_flags),
+            Some(InputMessage::MouseMove { dx: 7, dy: -4 })
+        );
     }
 
     #[test]
     fn a_real_unmarked_event_still_produces_a_move() {
         let mut last_flags = CGEventFlags::empty();
-        let mut last_position = Some(CGPoint { x: 490.0, y: 400.0 });
-        let event = mouse_moved_event(500.0, 400.0, false);
-        let message = to_input_message(
-            CGEventType::MouseMoved,
-            &event,
-            &mut last_flags,
-            &mut last_position,
-        );
+        let event = mouse_moved_event_with_delta(500.0, 400.0, 10, 0, false);
+        let message = to_input_message(CGEventType::MouseMoved, &event, &mut last_flags);
         assert_eq!(message, Some(InputMessage::MouseMove { dx: 10, dy: 0 }));
     }
 
+    /// **The Phase 4 pointer-range regression test**, at the lowest layer
+    /// that can actually reproduce the failure (ADR-0009 decision 17).
+    ///
+    /// Real hardware measurement, macOS 26.6.2 on a 1470x956 display:
+    /// pushing the pointer past the Mac's own right edge pinned
+    /// `CGEvent::location()` at exactly 1470.0 while the mouse kept
+    /// physically moving. The previous implementation derived
+    /// `InputMessage::MouseMove` by diffing successive `location()`
+    /// readings, so it reported `dx: 0` for every one of those events —
+    /// destroying the movement at the first stage of the pipeline, with
+    /// no possibility of any later stage recovering it. On the remote
+    /// screen that showed up as a cursor that could not reach the far
+    /// edges: "boxed into the middle."
+    ///
+    /// This reconstructs exactly that situation — consecutive events at
+    /// an identical, clamped location, each carrying real motion — and
+    /// asserts the real motion is what gets reported.
     #[test]
-    fn first_reading_with_no_previous_position_reports_zero_motion() {
-        // Regression test: a real-hardware Phase 4 edge-switch failure
-        // traced to this exact class of bug (see ADR-0009) -- the fix
-        // is diffing absolute CGEvent locations rather than trusting
-        // the raw, pre-acceleration-curve kCGMouseEventDeltaX/Y fields,
-        // and this first-event case is the one part of that fix that
-        // isn't simple subtraction: there's nothing to diff against yet.
-        assert_eq!(point_delta(None, CGPoint { x: 500.0, y: 400.0 }), (0, 0));
+    fn motion_is_still_reported_when_the_pointer_is_clamped_at_the_screen_edge() {
+        let mut last_flags = CGEventFlags::empty();
+        // Verbatim from the real hardware capture (samples 86-89): the
+        // location is pinned at the display's boundary and never
+        // changes, while the mouse reports substantial continued motion.
+        let clamped_at_right_edge = [102, 44, 89, 75];
+        for hid_dx in clamped_at_right_edge {
+            let event = mouse_moved_event_with_delta(1470.0, 411.4, hid_dx, 0, false);
+            assert_eq!(
+                to_input_message(CGEventType::MouseMoved, &event, &mut last_flags),
+                Some(InputMessage::MouseMove {
+                    dx: hid_dx as i32,
+                    dy: 0
+                }),
+                "an event whose location is clamped at the screen edge must still report \
+                 the motion it actually carries -- diffing locations reports 0 here, which \
+                 is the Phase 4 'remote cursor is boxed into the middle' bug"
+            );
+        }
+
+        // Symmetrically for the vertical clamp (real samples 314-320,
+        // location pinned at y=956.0) and for the negative direction.
+        for hid_dy in [2, 5, 3, -8, -12] {
+            let event = mouse_moved_event_with_delta(1470.0, 956.0, 0, hid_dy, false);
+            assert_eq!(
+                to_input_message(CGEventType::MouseMoved, &event, &mut last_flags),
+                Some(InputMessage::MouseMove {
+                    dx: 0,
+                    dy: hid_dy as i32
+                }),
+            );
+        }
     }
 
+    /// A genuinely stationary pointer must still report no motion — the
+    /// fix must not manufacture movement out of a clamped position.
     #[test]
-    fn subsequent_reading_reports_the_real_screen_point_delta() {
-        let previous = CGPoint { x: 500.0, y: 400.0 };
-        let current = CGPoint { x: 512.0, y: 397.0 };
-        assert_eq!(point_delta(Some(previous), current), (12, -3));
+    fn a_stationary_pointer_reports_no_motion() {
+        let mut last_flags = CGEventFlags::empty();
+        let event = mouse_moved_event_with_delta(1470.0, 411.4, 0, 0, false);
+        assert_eq!(
+            to_input_message(CGEventType::MouseMoved, &event, &mut last_flags),
+            Some(InputMessage::MouseMove { dx: 0, dy: 0 })
+        );
     }
 
+    /// Drag events carry motion the same way plain moves do — they are
+    /// forwarded through the identical arm, so the fix must cover them.
     #[test]
-    fn point_delta_rounds_fractional_motion_to_the_nearest_whole_point() {
-        let previous = CGPoint { x: 100.0, y: 100.0 };
-        let current = CGPoint { x: 100.6, y: 99.4 };
-        assert_eq!(point_delta(Some(previous), current), (1, -1));
-    }
-
-    #[test]
-    fn point_delta_is_not_the_raw_hid_delta_field() {
-        // The whole point of this fix: a real screen-edge-reaching
-        // movement (a large point-space displacement) must not be
-        // reported as some smaller, uncorrelated raw-HID-count value --
-        // this asserts the actual on-screen distance is what comes out,
-        // for a displacement large enough to plausibly cross a real
-        // screen's width.
-        let previous = CGPoint { x: 0.0, y: 0.0 };
-        let current = CGPoint { x: 1470.0, y: 0.0 };
-        assert_eq!(point_delta(Some(previous), current), (1470, 0));
+    fn drag_events_report_motion_too() {
+        let mut last_flags = CGEventFlags::empty();
+        for event_type in [
+            CGEventType::LeftMouseDragged,
+            CGEventType::RightMouseDragged,
+            CGEventType::OtherMouseDragged,
+        ] {
+            let event = mouse_moved_event_with_delta(1470.0, 400.0, 33, -16, false);
+            assert_eq!(
+                to_input_message(event_type, &event, &mut last_flags),
+                Some(InputMessage::MouseMove { dx: 33, dy: -16 }),
+                "{event_type:?} must report motion identically to a plain move"
+            );
+        }
     }
 
     #[test]

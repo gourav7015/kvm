@@ -124,14 +124,15 @@ impl Capture for MacCapture {
             .spawn(move || {
                 let events_of_interest = crate::macos::events::CAPTURED_EVENT_TYPES.to_vec();
                 // Fresh per capture session, so a stale modifier-held
-                // state (or a stale absolute cursor reading — see
-                // ADR-0009) from a previous start()/stop() cycle never
-                // leaks into this one. A `Cell` rather than a plain
-                // local: `CGEventTap::new` requires an `Fn` callback, not
+                // state from a previous start()/stop() cycle never leaks
+                // into this one. A `Cell` rather than a plain local:
+                // `CGEventTap::new` requires an `Fn` callback, not
                 // `FnMut`, so the closure only ever touches this through
-                // a shared reference.
+                // a shared reference. Mouse motion needs no equivalent
+                // per-session state — see `events::mouse_delta` and
+                // ADR-0009 decision 17 for why carrying a previous
+                // cursor reading here was the Phase 4 pointer-range bug.
                 let last_flags = Cell::new(CGEventFlags::empty());
-                let last_position: Cell<Option<core_graphics::geometry::CGPoint>> = Cell::new(None);
                 // `None` until the first mouse-motion event applies an
                 // initial association state; used only to decide whether
                 // a change is worth a log line (see decision 14) -- the
@@ -178,11 +179,8 @@ impl Capture for MacCapture {
                             return CallbackResult::Keep;
                         }
                         let mut flags = last_flags.get();
-                        let mut position = last_position.get();
-                        let message =
-                            to_input_message(event_type, event, &mut flags, &mut position);
+                        let message = to_input_message(event_type, event, &mut flags);
                         last_flags.set(flags);
-                        last_position.set(position);
                         if let Some(message) = message {
                             // A full channel or a dropped receiver just
                             // means "no one is listening anymore" — not a

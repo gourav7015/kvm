@@ -172,6 +172,32 @@ impl Session {
     }
 }
 
+/// Exchanges each side's screen size over an already-established
+/// peer's control stream — real ground truth for the resolution-aware
+/// pointer handoff math (ADR-0009 §6), rather than a guess. Call this
+/// once, right after `net::connect`/`accept` returns and before
+/// handing the `Peer` to `Session::add_peer`/`run_target` — the
+/// control stream is free for ordinary use at that point, since the
+/// identity handshake itself is already done.
+pub async fn exchange_screen_size(
+    peer: &mut Peer,
+    our_screen_size: (u32, u32),
+) -> Result<(u32, u32), CoreError> {
+    peer.streams
+        .control
+        .send(&Message::Control(ControlMessage::ScreenInfo {
+            width: our_screen_size.0,
+            height: our_screen_size.1,
+        }))
+        .await?;
+    match peer.recv_control().await? {
+        ControlMessage::ScreenInfo { width, height } => Ok((width, height)),
+        other => Err(CoreError::Net(NetError::ProtocolViolation(format!(
+            "expected a ScreenInfo control message, got {other:?}"
+        )))),
+    }
+}
+
 /// Runs on the target side for the whole lifetime of one peer
 /// connection — not just the first switch. Concurrently waits for
 /// `SwitchActive` (warping the local cursor via `geometry` every time

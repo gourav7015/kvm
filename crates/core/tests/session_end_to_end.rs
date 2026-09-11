@@ -10,7 +10,9 @@ use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
-use kvm_core::{Edge, Layout, LayoutDevice, OwnershipState, Session, run_target};
+use kvm_core::{
+    Edge, Layout, LayoutDevice, OwnershipState, Session, exchange_screen_size, run_target,
+};
 use kvm_identity::DeviceKeypair;
 use kvm_input::{Inject, InputError, PointerGeometry};
 use kvm_net::{IdentityCert, Peer, TrustCheck};
@@ -127,6 +129,21 @@ impl Inject for FakeInject {
         self.received.lock().unwrap().push(event.clone());
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn screen_size_exchange_is_symmetric_and_carries_each_sides_real_size() {
+    let a = Device::new([18u8; 32]);
+    let b = Device::new([19u8; 32]);
+    let (mut peer_a, mut peer_b) = connect_pair(&a, &b).await;
+
+    let (a_learned, b_learned) = tokio::join!(
+        exchange_screen_size(&mut peer_a, (1920, 1080)),
+        exchange_screen_size(&mut peer_b, (1280, 720)),
+    );
+
+    assert_eq!(a_learned.unwrap(), (1280, 720));
+    assert_eq!(b_learned.unwrap(), (1920, 1080));
 }
 
 #[tokio::test]

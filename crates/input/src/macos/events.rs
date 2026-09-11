@@ -3,6 +3,7 @@
 //! conversion, no cross-platform logic.
 
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventType, EventField};
+use core_graphics::geometry::CGPoint;
 use kvm_protocol::{ButtonState, InputMessage, Key, MouseButton, PlatformKind};
 
 use crate::macos::keycode::keycode_to_key;
@@ -30,16 +31,21 @@ pub const CAPTURED_EVENT_TYPES: &[CGEventType] = &[
 /// `FlagsChanged` transition that can't be disambiguated — see
 /// [`modifier_transition`]).
 ///
-/// `last_flags` carries the modifier-flags state across calls within one
+/// `last_flags` and `last_position` carry state across calls within one
 /// capture session (owned by the caller — see [`crate::macos::capture`]
-/// — and expected to start at [`CGEventFlags::empty`] each time capture
-/// (re)starts), since a `FlagsChanged` event only reports the *current*
-/// combined flags, not which direction the specific key that triggered
-/// it just moved.
+/// — and expected to start at [`CGEventFlags::empty`]/`None`
+/// respectively each time capture (re)starts): `last_flags` because a
+/// `FlagsChanged` event only reports the *current* combined flags, not
+/// which direction the specific key that triggered it just moved;
+/// `last_position` because a mouse-move event's delta fields
+/// (`kCGMouseEventDeltaX/Y`) are raw, pre-acceleration-curve HID counts
+/// — not screen-point distances — and this project's `InputMessage::MouseMove`
+/// contract is a screen-point delta (see [`point_delta`]).
 pub fn to_input_message(
     event_type: CGEventType,
     event: &CGEvent,
     last_flags: &mut CGEventFlags,
+    last_position: &mut Option<CGPoint>,
 ) -> Option<InputMessage> {
     match event_type {
         CGEventType::KeyDown | CGEventType::KeyUp => {
@@ -75,8 +81,8 @@ pub fn to_input_message(
         | CGEventType::LeftMouseDragged
         | CGEventType::RightMouseDragged
         | CGEventType::OtherMouseDragged => {
-            let dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X) as i32;
-            let dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y) as i32;
+            let location = event.location();
+            let (dx, dy) = point_delta(last_position.replace(location), location);
             Some(InputMessage::MouseMove { dx, dy })
         }
         CGEventType::LeftMouseDown => Some(InputMessage::MouseButton {
@@ -111,6 +117,27 @@ pub fn to_input_message(
             Some(InputMessage::MouseScroll { dx, dy })
         }
         _ => None,
+    }
+}
+
+/// The screen-point delta between two absolute cursor readings, or
+/// `(0, 0)` if there's no previous reading yet (the very first
+/// mouse-move event seen since capture started — nothing to diff
+/// against, and reporting a large one-off jump from an arbitrary origin
+/// would be worse than reporting no motion for that single event).
+///
+/// Pure and `CGEvent`-independent so it's fully unit-testable — the
+/// surrounding `CGEvent::location()` call in [`to_input_message`] is
+/// the actual "thin shim" piece (see ADR-0007/ADR-0009). Sub-point
+/// motion is rounded to the nearest whole point, matching the whole-unit
+/// `InputMessage::MouseMove` contract every other platform already uses.
+fn point_delta(previous: Option<CGPoint>, current: CGPoint) -> (i32, i32) {
+    match previous {
+        Some(previous) => (
+            (current.x - previous.x).round() as i32,
+            (current.y - previous.y).round() as i32,
+        ),
+        None => (0, 0),
     }
 }
 
@@ -173,6 +200,44 @@ fn modifier_transition(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_reading_with_no_previous_position_reports_zero_motion() {
+        // Regression test: a real-hardware Phase 4 edge-switch failure
+        // traced to this exact class of bug (see ADR-0009) -- the fix
+        // is diffing absolute CGEvent locations rather than trusting
+        // the raw, pre-acceleration-curve kCGMouseEventDeltaX/Y fields,
+        // and this first-event case is the one part of that fix that
+        // isn't simple subtraction: there's nothing to diff against yet.
+        assert_eq!(point_delta(None, CGPoint { x: 500.0, y: 400.0 }), (0, 0));
+    }
+
+    #[test]
+    fn subsequent_reading_reports_the_real_screen_point_delta() {
+        let previous = CGPoint { x: 500.0, y: 400.0 };
+        let current = CGPoint { x: 512.0, y: 397.0 };
+        assert_eq!(point_delta(Some(previous), current), (12, -3));
+    }
+
+    #[test]
+    fn point_delta_rounds_fractional_motion_to_the_nearest_whole_point() {
+        let previous = CGPoint { x: 100.0, y: 100.0 };
+        let current = CGPoint { x: 100.6, y: 99.4 };
+        assert_eq!(point_delta(Some(previous), current), (1, -1));
+    }
+
+    #[test]
+    fn point_delta_is_not_the_raw_hid_delta_field() {
+        // The whole point of this fix: a real screen-edge-reaching
+        // movement (a large point-space displacement) must not be
+        // reported as some smaller, uncorrelated raw-HID-count value --
+        // this asserts the actual on-screen distance is what comes out,
+        // for a displacement large enough to plausibly cross a real
+        // screen's width.
+        let previous = CGPoint { x: 0.0, y: 0.0 };
+        let current = CGPoint { x: 1470.0, y: 0.0 };
+        assert_eq!(point_delta(Some(previous), current), (1470, 0));
+    }
 
     #[test]
     fn a_bare_modifier_press_is_reported() {

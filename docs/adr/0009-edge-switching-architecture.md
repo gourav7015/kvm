@@ -782,6 +782,46 @@ by any remaining coordinate defect. `full_windows_shaped_screen_is_reachable_at_
 behavior with a real regression test rather than leaving this only as
 log-based evidence.
 
+**Update (2026-09-12): real hardware confirmed Failure A fixed;
+Failure B partially re-litigated, surfacing a genuine off-by-one.**
+Decision 14's thread-affinity fix was confirmed working by direct
+observation: the Mac cursor stayed still throughout a real forwarding
+session. The Windows-range complaint persisted, reported specifically
+as the right/top/bottom edges and "boxed into the middle generally" —
+important, because the real 2-device test topology only configures
+Windows' *left* edge to switch back to Mac, so the left side being
+unreachable while staying on Windows is expected, not a bug; the other
+three edges are supposed to be freely reachable.
+
+Checking the actual session's logged `virtual_cursor` range showed the
+tracked x position never exceeded ~742 out of a possible 1365 — nowhere
+near the edge-clamp trigger zone (`x >= 1362`) `full_windows_shaped_screen_is_reachable_at_all_four_corners_and_center`
+already proves is handled correctly. This is consistent with a single
+continuous trackpad swipe simply not covering that much physical
+travel distance — the same limitation as moving a cursor across any
+large display with a small trackpad, solved the same way (lift the
+finger, reposition, swipe again) — not a software cap. Real-hardware
+retest with that technique is still needed to close this out.
+
+While re-verifying this, a real, separate off-by-one surfaced:
+`ownership::entry_position` clamped the *input* fraction to `[0.0,
+1.0]` but not the *output* pixel coordinate, so a crossing exactly at
+(or past, then clamped to) the source screen's true edge computed a
+destination coordinate equal to `dest_extent` itself — one row/column
+past the true max valid index (`dest_extent - 1`). A pre-existing test
+(`entry_position_clamps_out_of_bounds_coordinates`) had encoded this
+exact wrong value (`(0, 800)` on an 800-tall screen) as the expected
+result, hiding it. Fixed by clamping the computed pixel coordinate
+itself, not just the fraction feeding it; the test now asserts `(0,
+799)`, and a new test (`entry_position_landing_exactly_at_the_source_edge_still_lands_in_bounds`)
+covers all four edges landing exactly at the source's true boundary.
+This is a real, independent bug fix — not the primary explanation for
+the "boxed in" report (a one-time landing overflow, immediately
+self-correcting via the existing dead-edge clamp on the very next
+event, doesn't produce a *sustained* restriction), but a genuine
+correctness issue worth fixing regardless of whether it's the whole
+story.
+
 ## Consequences
 
 - `crates/core` gains `layout.rs`, `ownership.rs`, `router.rs`,
@@ -789,10 +829,11 @@ log-based evidence.
   at a time. `crates/input` gains `PointerGeometry`, implemented for
   all three existing backends. `crates/protocol` gains one changed and
   one new `ControlMessage` variant.
-- Automated coverage: 55 unit tests in `kvm-core` (`layout`/`ownership`/
+- Automated coverage: 56 unit tests in `kvm-core` (`layout`/`ownership`/
   `router`, all pure, no I/O, including a dead-edge clamp-to-the-exact-
-  boundary regression and full four-corner-plus-center reachability for
-  a real Windows-shaped screen) plus 13 real-loopback-`Peer` integration
+  boundary regression, full four-corner-plus-center reachability for a
+  real Windows-shaped screen, and an entry-position landing-exactly-at-
+  the-source-edge regression) plus 13 real-loopback-`Peer` integration
   tests in `crates/core/tests/session_end_to_end.rs` covering edge
   crossing + cursor warp, screen-size exchange, an unregistered device
   never becoming a target, disconnect/reconnect without restarting the

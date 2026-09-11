@@ -154,28 +154,43 @@ pub fn entry_position(
     dest_screen: (u32, u32),
     crossing_coordinate: i32,
 ) -> (i32, i32) {
-    fn fraction(coordinate: i32, extent: u32) -> f64 {
-        let extent = extent.max(1) as f64;
-        (coordinate as f64 / extent).clamp(0.0, 1.0)
+    // Rescales `coordinate` (as a fraction of `source_extent`) onto
+    // `dest_extent`'s own range, clamped to `[0, dest_extent - 1]`.
+    //
+    // **Real-hardware regression, fixed here**: clamping the *input*
+    // fraction to `[0.0, 1.0]` (the previous implementation) still lets
+    // a crossing exactly at (or past, then clamped to) the source's own
+    // true edge compute `fraction == 1.0`, landing at `dest_extent`
+    // itself -- one row/column past the true max valid index
+    // (`dest_extent - 1`). A pre-existing test
+    // (`entry_position_clamps_out_of_bounds_coordinates`) had encoded
+    // this exact wrong value as the expected result. Clamping the
+    // *output* pixel coordinate, not just the input fraction, is what
+    // actually guarantees an in-bounds landing position.
+    fn rescale(coordinate: i32, source_extent: u32, dest_extent: u32) -> i32 {
+        let source_extent = source_extent.max(1) as f64;
+        let fraction = (coordinate as f64 / source_extent).clamp(0.0, 1.0);
+        let pixel = (fraction * dest_extent as f64) as i32;
+        pixel.clamp(0, dest_extent.saturating_sub(1) as i32)
     }
 
     let (dest_w, dest_h) = (dest_screen.0, dest_screen.1);
 
     match edge {
         Edge::Right => {
-            let y = (fraction(crossing_coordinate, source_screen.1) * dest_h as f64) as i32;
+            let y = rescale(crossing_coordinate, source_screen.1, dest_h);
             (0, y)
         }
         Edge::Left => {
-            let y = (fraction(crossing_coordinate, source_screen.1) * dest_h as f64) as i32;
+            let y = rescale(crossing_coordinate, source_screen.1, dest_h);
             (dest_w.saturating_sub(1) as i32, y)
         }
         Edge::Bottom => {
-            let x = (fraction(crossing_coordinate, source_screen.0) * dest_w as f64) as i32;
+            let x = rescale(crossing_coordinate, source_screen.0, dest_w);
             (x, 0)
         }
         Edge::Top => {
-            let x = (fraction(crossing_coordinate, source_screen.0) * dest_w as f64) as i32;
+            let x = rescale(crossing_coordinate, source_screen.0, dest_w);
             (x, dest_h.saturating_sub(1) as i32)
         }
     }
@@ -511,11 +526,41 @@ mod tests {
 
     #[test]
     fn entry_position_clamps_out_of_bounds_coordinates() {
+        // Regression: the landing coordinate must be clamped to
+        // `dest_extent - 1` (the true max valid index), not
+        // `dest_extent` itself -- (0, 800) on an 800-tall screen is one
+        // row past the true bottom edge (index 799), a real
+        // hardware-hunt finding (see ADR-0009's Update note) that a
+        // previous version of this test had locked in as "correct."
         let too_far = entry_position(Edge::Right, (1000, 800), (1000, 800), 5000);
-        assert_eq!(too_far, (0, 800));
+        assert_eq!(too_far, (0, 799));
 
         let negative = entry_position(Edge::Right, (1000, 800), (1000, 800), -100);
         assert_eq!(negative, (0, 0));
+    }
+
+    #[test]
+    fn entry_position_landing_exactly_at_the_source_edge_still_lands_in_bounds() {
+        // A crossing coordinate exactly equal to the source extent
+        // (not just "too far past it") is the realistic case a real
+        // OS-clamped cursor actually produces -- must still land at
+        // the true max index, not one past it, on every edge.
+        assert_eq!(
+            entry_position(Edge::Right, (1000, 800), (1366, 768), 800),
+            (0, 767)
+        );
+        assert_eq!(
+            entry_position(Edge::Left, (1000, 800), (1366, 768), 800),
+            (1365, 767)
+        );
+        assert_eq!(
+            entry_position(Edge::Bottom, (1000, 800), (1366, 768), 1000),
+            (1365, 0)
+        );
+        assert_eq!(
+            entry_position(Edge::Top, (1000, 800), (1366, 768), 1000),
+            (1365, 767)
+        );
     }
 
     #[test]

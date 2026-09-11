@@ -24,6 +24,32 @@ lowest layer that can actually exercise the live wiring end-to-end.
 translation stays out of the per-OS shims, preserving decision 2's
 "provably thin, zero business logic" property.
 
+**Update (2026-09-11, following real Mac<->Windows manual QA):** the
+real hardware run confirmed decision 4's `FlagsChanged => None` gap in
+practice — a bare Shift/Control/Option/Command press on the Mac
+produced nothing at all, which meant Mac->Windows modifier translation
+couldn't be exercised in that direction. Implemented rather than left
+deferred: `macos/events.rs` now diffs the modifier flags immediately
+before and after a `FlagsChanged` event (state carried in a `Cell`
+owned by the capture session, reset on every `start()`) against the
+category bit for the specific key the event's own keycode identifies,
+and reports a press or release only when that bit actually flipped. Two
+things are deliberately still out of scope, not silently mishandled:
+holding both keys in one modifier category (e.g. both Shift keys) and
+releasing one — `CGEventFlags` has one bit per *category*, not per key,
+so that specific transition can't be told apart from "nothing changed"
+from this event alone, and is reported as no event rather than guessed
+at; and Caps Lock, whose flag is a toggle rather than a held-state, a
+different enough semantic that it isn't folded into this inference.
+Fully unit-tested as a pure function (`modifier_transition`, given
+already-extracted flags values, no real `CGEvent` needed) — the actual
+`CGEvent` field extraction around it stays the untested "thin shim",
+per this ADR's own HAL-split rationale. This closes the "Mac
+Command press is never captured" gap; it does **not** add
+concurrent-modifier-state to non-modifier keys (a real Mac-side Cmd+C
+still sends only a plain `C`, no indication Command was held) — that
+remains a separate, larger, not-yet-scoped piece of work.
+
 ## Context
 
 Phase 3 needed a platform-independent input representation plus per-OS

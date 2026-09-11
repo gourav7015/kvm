@@ -2,12 +2,14 @@
 //! describes: it converts `CGEvent`s to [`InputMessage`]s and runs the
 //! OS event loop — no cross-platform translation logic lives here.
 
+use std::cell::Cell;
 use std::sync::mpsc;
 use std::thread;
 
 use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
 use core_graphics::event::{
-    CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CallbackResult,
+    CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CallbackResult,
 };
 
 use crate::error::InputError;
@@ -46,6 +48,13 @@ impl Capture for MacCapture {
             .name("kvm-input-macos-capture".to_string())
             .spawn(move || {
                 let events_of_interest = crate::macos::events::CAPTURED_EVENT_TYPES.to_vec();
+                // Fresh per capture session, so a stale modifier-held
+                // state from a previous start()/stop() cycle never
+                // leaks into this one. A `Cell` rather than a plain
+                // local: `CGEventTap::new` requires an `Fn` callback, not
+                // `FnMut`, so the closure only ever touches this through
+                // a shared reference.
+                let last_flags = Cell::new(CGEventFlags::empty());
 
                 let tap = CGEventTap::new(
                     CGEventTapLocation::HID,
@@ -53,7 +62,10 @@ impl Capture for MacCapture {
                     CGEventTapOptions::ListenOnly,
                     events_of_interest,
                     move |_proxy, event_type, event| {
-                        if let Some(message) = to_input_message(event_type, event) {
+                        let mut flags = last_flags.get();
+                        let message = to_input_message(event_type, event, &mut flags);
+                        last_flags.set(flags);
+                        if let Some(message) = message {
                             // A full channel or a dropped receiver just
                             // means "no one is listening anymore" — not a
                             // capture failure worth surfacing per-event.

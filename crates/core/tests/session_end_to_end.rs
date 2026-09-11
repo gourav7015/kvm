@@ -139,6 +139,29 @@ impl Inject for FakeInject {
     }
 }
 
+/// Fails exactly once (on the Nth call), then succeeds for every call
+/// after that -- stands in for a real, transient `SendInput`/`CGEvent`
+/// rejection (a focus change, a UIPI restriction, a momentary OS
+/// hiccup) that must not be fatal to the whole target session.
+struct FlakyInject {
+    received: Arc<Mutex<Vec<InputMessage>>>,
+    fail_on_call: usize,
+    calls: usize,
+}
+
+impl Inject for FlakyInject {
+    fn inject(&mut self, event: &InputMessage) -> Result<(), InputError> {
+        self.calls += 1;
+        if self.calls == self.fail_on_call {
+            return Err(InputError::InjectFailed(
+                "simulated transient injection failure".to_string(),
+            ));
+        }
+        self.received.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn screen_size_exchange_is_symmetric_and_carries_each_sides_real_size() {
     let a = Device::new([18u8; 32]);
@@ -642,6 +665,95 @@ async fn recentering_the_local_cursor_is_actually_applied_via_pointer_geometry()
     // Our own local cursor must now be away from the edge (the middle
     // of our 1000x800 screen), not still pinned at (990, 400).
     assert_eq!(local_geometry.cursor_position().unwrap(), (500, 400));
+
+    drop(session);
+    let _ = target_task.await;
+}
+
+#[tokio::test]
+async fn a_single_transient_injection_failure_does_not_kill_the_whole_session() {
+    // Regression test for a real Mac->Windows hardware QA finding (see
+    // ADR-0009's Update note): run_target used to propagate any single
+    // injection failure with `?`, ending the entire target session (and
+    // therefore the whole connection) on one transient SendInput
+    // rejection -- exactly the "worked for a while, then the whole
+    // thing silently died, with no way back in short of a full
+    // restart" real hardware symptom. A single failure must be
+    // surfaced (logged) but not fatal: later events on the same
+    // connection must still be injected normally.
+    let a = Device::new([24u8; 32]);
+    let b = Device::new([25u8; 32]);
+    let (peer_a, mut peer_b) = connect_pair(&a, &b).await;
+
+    let layout = two_device_layout(a.device_id, b.device_id);
+    let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
+    session.add_peer(b.device_id, peer_a, (1000, 800));
+    let mut local_geometry = FakeGeometry::new((500, 400));
+
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let target_task = {
+        let received = received.clone();
+        tokio::spawn(async move {
+            let mut geometry = FakeGeometry::new((0, 0));
+            // Fails on the 2nd injected event (the 1st being the
+            // control-stream cursor warp doesn't count against this --
+            // FlakyInject only counts Inject::inject calls, i.e. Input
+            // stream events).
+            let mut inject = FlakyInject {
+                received,
+                fail_on_call: 2,
+                calls: 0,
+            };
+            run_target(&mut peer_b, &mut geometry, &mut inject).await
+        })
+    };
+
+    // -> Forwarding(B).
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+        )
+        .await
+        .unwrap();
+
+    // Three follow-up moves: the 2nd's injection fails on B, but B's
+    // session must keep running and inject the 1st and 3rd normally.
+    for delta in [(1, 0), (2, 0), (3, 0)] {
+        session
+            .handle_captured(
+                InputMessage::MouseMove {
+                    dx: delta.0,
+                    dy: delta.1,
+                },
+                &mut local_geometry,
+            )
+            .await
+            .unwrap();
+    }
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if received.lock().unwrap().len() >= 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for events after the failed one to still be injected"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // The 2nd move (dx=2) was dropped by the simulated failure; the 1st
+    // (dx=1) and 3rd (dx=3) must both have landed.
+    let got = received.lock().unwrap().clone();
+    assert_eq!(
+        got,
+        vec![
+            InputMessage::MouseMove { dx: 1, dy: 0 },
+            InputMessage::MouseMove { dx: 3, dy: 0 },
+        ]
+    );
 
     drop(session);
     let _ = target_task.await;

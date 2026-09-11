@@ -153,7 +153,10 @@ impl Session {
                 local_geometry.set_cursor_position(x, y)?;
                 return Ok(());
             }
-            Effect::Send { to, message } => (to, Message::Input(message)),
+            Effect::Send { to, message } => {
+                tracing::trace!(?to, ?message, "sending input to active target");
+                (to, Message::Input(message))
+            }
             Effect::Switch {
                 to,
                 cursor_position,
@@ -181,12 +184,17 @@ impl Session {
         };
 
         match stream.send(&message).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                tracing::trace!(?to, "send succeeded");
+                Ok(())
+            }
             Err(NetError::ConnectionClosed) => {
+                tracing::warn!(?to, "send failed: connection closed");
                 self.remove_peer(to);
                 Ok(())
             }
             Err(e) => {
+                tracing::warn!(?to, error = %e, "send failed");
                 self.remove_peer(to);
                 Err(CoreError::Net(e))
             }
@@ -240,7 +248,15 @@ pub async fn run_target(
             control_msg = control.recv() => {
                 match control_msg {
                     Ok(Message::Control(ControlMessage::SwitchActive { cursor_position: (x, y), .. })) => {
-                        geometry.set_cursor_position(x, y)?;
+                        // A single failed cursor warp (the OS can refuse
+                        // one for all sorts of transient reasons) must
+                        // not tear down the whole target session --
+                        // surfaced via tracing (per ADR-0007: never
+                        // silently pretended successful), but the
+                        // connection and injection loop carry on.
+                        if let Err(e) = geometry.set_cursor_position(x, y) {
+                            tracing::warn!(error = %e, x, y, "cursor warp failed -- continuing");
+                        }
                     }
                     Ok(other) => {
                         return Err(CoreError::Net(NetError::ProtocolViolation(format!(
@@ -253,7 +269,20 @@ pub async fn run_target(
             }
             input_msg = input.recv() => {
                 match input_msg {
-                    Ok(Message::Input(event)) => inject.inject(&translate_for_local_platform(event))?,
+                    Ok(Message::Input(event)) => {
+                        // Same reasoning: one failed injection (e.g. a
+                        // transient SendInput rejection due to a focus
+                        // change or UIPI restriction on Windows) must
+                        // not silently kill the entire remote-control
+                        // session -- see ADR-0009's Update note for the
+                        // real hardware failure this was found from
+                        // (the whole session died on the first rejected
+                        // injection, with no way to recover without a
+                        // full manual restart).
+                        if let Err(e) = inject.inject(&translate_for_local_platform(event)) {
+                            tracing::warn!(error = %e, "injection failed for one event -- continuing");
+                        }
+                    }
                     Ok(other) => {
                         return Err(CoreError::Net(NetError::ProtocolViolation(format!(
                             "expected an Input message on the input stream, got {other:?}"

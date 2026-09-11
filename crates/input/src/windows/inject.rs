@@ -29,7 +29,13 @@ pub struct WindowsInject;
 
 impl WindowsInject {
     pub fn new() -> Self {
-        // TEMPORARY diagnostic tracing (pointer-range root-cause hunt):
+        // Real fix for the pointer-range hardware bug (ADR-0009
+        // decision 9) -- see crate::windows::dpi's module doc for the
+        // full root-cause explanation. Must happen before any of the
+        // GetSystemMetrics/GetCursorPos/SetCursorPos calls below.
+        crate::windows::dpi::ensure_process_dpi_awareness();
+        // Diagnostic tracing (kept, not just for this hunt): this
+        // process's now-real, physical-pixel system DPI.
         // this process's system DPI. `GetSystemMetrics`/`GetCursorPos`/
         // `SetCursorPos` all report/accept coordinates in this same
         // process's DPI-awareness space -- if that space isn't 100%

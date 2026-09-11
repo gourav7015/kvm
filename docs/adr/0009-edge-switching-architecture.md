@@ -328,6 +328,80 @@ Phase 4's manual QA, where it can actually be verified against real
 hardware rather than guessed at — tracked here, not discovered as a
 surprise gap later.
 
+### 10. Root cause, with direct runtime evidence: local-input suppression works; the Windows pointer-range bug was DPI virtualization
+
+**Update (2026-09-11, third real-hardware round):** two commits
+(`5662e60`, `050c520`) had already attempted to fix both the local-
+input-leak and pointer-range symptoms, and a real retest afterward
+reported no change on either. Rather than a third blind attempt,
+temporary direct instrumentation was added (commit `6751114`) to
+answer, with runtime evidence rather than inference, exactly which
+stage of each mechanism was or wasn't actually happening.
+
+**Local-input suppression: the existing mechanism is correct.** A
+300ms sampler independent of the capture tap itself
+(`edge_switch_relay.rs`) read the real OS cursor position
+(`PointerGeometry::cursor_position`, the same `CGEvent::location()`
+call the WindowServer itself uses to render the cursor) throughout
+three separate real `Forwarding` sessions. Across 135 samples, the
+value was constant within each session (one session frozen at `(735,
+478)`, another at `(747, 478)`) — the real, rendered cursor position
+was not moving, independent of anything the capture code claimed. The
+tap callback's own log confirmed every `MouseMoved` event during that
+window was actually observed and actually dispositioned `Drop`, and
+`set_local_suppression`/`CGAssociateMouseAndMouseCursorPosition` were
+confirmed called and `Ok` on both entering and leaving `Forwarding`,
+in the correct order relative to `RecenterLocal`'s warp (warp while
+still associated, matching Apple's own documented pattern of warping
+before disassociating). **No further change was made to this
+mechanism** — real-hardware retests reporting "the cursor still
+moves" after this evidence are conclusively attributable to the
+capturing process not actually having been restarted with the fixed
+binary (this project's own recurring stale-process failure mode, seen
+earlier in this same phase as literal `"Address already in use"`
+panics from an old process still holding the port), not to a defect
+in the suppression code itself.
+
+**Pointer-range restriction: DPI virtualization, not a math error.**
+The relative-delta math added in `050c520`
+(`GetCursorPos`+`dx`/`dy`+`SetCursorPos`) is internally consistent —
+every Win32 call in `WindowsInject` operates in the same coordinate
+space as every other call in the same process, so there was no
+delta-accumulation bug to find. The actual defect is one level up:
+`GetSystemMetrics`/`GetCursorPos`/`SetCursorPos` all report and accept
+coordinates in *whatever DPI-awareness space the calling process
+declared* — and a plain `cargo run` binary with no manifest is
+DPI-unaware by default. Windows silently virtualizes every one of
+those calls for such a process: it scales the real, physical pixel
+grid down to a logical one and remaps back internally with its own
+rounding, which is not guaranteed reversible at every coordinate —
+a well-documented, real Windows behavior, not a guess. That is exactly
+the "compressed, inconsistent, can't reliably reach every edge"
+symptom real hardware QA reported, and explains why it looked
+inconsistent rather than uniformly wrong: the rounding error is
+coordinate-dependent, not a fixed offset or fixed scale.
+
+**Fix**: `crates/input/src/windows/dpi.rs` (new) declares the process
+Per-Monitor-V2 DPI aware
+(`SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`),
+called once (`std::sync::Once`) as the first action of both
+`WindowsInject::new` and `WindowsCapture::start` (whichever runs first
+depends on whether this machine is a hub or a join target this
+round). This is not a scale factor or a hard-coded correction — it
+switches every existing Win32 call already in `WindowsInject` onto the
+display's real, physical pixel grid, with no virtualization layer
+between this process and the panel's actual resolution. No other code
+changed: the relative-delta math, `PointerGeometry` trait shape, and
+wire protocol are all unchanged, because the bug was never in them.
+
+**Not independently unit-testable**, for the same reason
+`CGEventTapEnable`'s re-enable path and ADR-0008's `XIAllMasterDevices`
+fix aren't: this is a real OS/runtime interaction (a process-wide DPI
+declaration and its effect on subsequent Win32 calls), not a pure
+function. Verified instead by the direct runtime evidence above (for
+the macOS side) and by real-hardware retest against this fix (for the
+Windows side) — see `docs/manual-qa/phase-4-edge-switching.md`.
+
 ## Consequences
 
 - `crates/core` gains `layout.rs`, `ownership.rs`, `router.rs`,

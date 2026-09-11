@@ -3,6 +3,7 @@
 //! documented no-elevation/UAC limitation.
 
 mod capture;
+mod dpi;
 mod inject;
 mod keycode;
 

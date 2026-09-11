@@ -178,6 +178,11 @@ impl WindowsCapture {
 
 impl Capture for WindowsCapture {
     fn start(&mut self, sink: mpsc::Sender<InputMessage>) -> Result<(), InputError> {
+        // See crate::windows::dpi's module doc: this machine could act
+        // as a hub in a future round, so its own PointerGeometry calls
+        // need the same real-physical-pixel coordinate space as
+        // WindowsInject's.
+        crate::windows::dpi::ensure_process_dpi_awareness();
         {
             let mut guard = SINK
                 .lock()

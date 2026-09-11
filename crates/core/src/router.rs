@@ -30,6 +30,25 @@ use kvm_protocol::{ButtonState, DeviceId, InputMessage, Key, PlatformKind};
 use crate::layout::{Edge, Layout};
 use crate::ownership::{self, OwnershipEvent, OwnershipState, entry_position};
 
+/// How close (in screen points) the tracked position must get to a
+/// screen's physical boundary before it's treated as "at the edge."
+///
+/// **Found via real Mac->Windows hardware QA (see ADR-0009's Update
+/// note)**: a real OS cursor is clamped by the OS itself to stay
+/// within a display's bounds, and the exact maximum/minimum reachable
+/// coordinate lands a few points *short* of the nominal
+/// `PointerGeometry::screen_size` — on the real hardware that exposed
+/// this, a 1470-point-wide display's cursor topped out at x=1468, not
+/// 1469 or 1470. An exact `x >= width` (or `x < 0`) predicate is
+/// therefore unreachable by any real, absolute-position-tracked
+/// capture: `dx` permanently reports `0` once the real cursor is
+/// pinned, so the tracked position can never cross a boundary that sits
+/// past what the OS itself will ever report. A small margin makes the
+/// predicate satisfiable in practice without hard-coding a
+/// display-specific magic number for exactly where the real clamp
+/// lands (which varies by platform/cursor icon/display).
+const EDGE_MARGIN: i32 = 4;
+
 /// Something a [`Router`] decided must actually happen. Turning this
 /// into reality (sending on a peer's stream) is `session.rs`'s job.
 #[derive(Debug, Clone, PartialEq)]
@@ -138,13 +157,13 @@ impl Router {
     fn crossed_edge(&self) -> Option<Edge> {
         let &(width, height) = self.screen_sizes.get(&self.active_screen_owner())?;
         let (x, y) = self.position;
-        if x < 0 {
+        if x <= EDGE_MARGIN {
             Some(Edge::Left)
-        } else if x >= width as i32 {
+        } else if x >= width as i32 - EDGE_MARGIN {
             Some(Edge::Right)
-        } else if y < 0 {
+        } else if y <= EDGE_MARGIN {
             Some(Edge::Top)
-        } else if y >= height as i32 {
+        } else if y >= height as i32 - EDGE_MARGIN {
             Some(Edge::Bottom)
         } else {
             None
@@ -191,12 +210,24 @@ impl Router {
         let old_state = self.state;
         self.position = (self.position.0 + dx, self.position.1 + dy);
 
+        let active_screen_owner = self.active_screen_owner();
+        let active_screen_size = self.screen_sizes.get(&active_screen_owner).copied();
+        tracing::trace!(
+            dx,
+            dy,
+            position = ?self.position,
+            ?active_screen_owner,
+            ?active_screen_size,
+            "mouse move accumulated"
+        );
+
         let Some(edge) = self.crossed_edge() else {
             return self
                 .route(InputMessage::MouseMove { dx, dy })
                 .into_iter()
                 .collect();
         };
+        tracing::debug!(?edge, position = ?self.position, "edge predicate true");
 
         let coordinate = match edge {
             Edge::Left | Edge::Right => self.position.1,
@@ -224,12 +255,23 @@ impl Router {
             // back the other way to re-enter (see the kickoff's
             // "rapid repeated edge crossing" / boundary-coordinate
             // items).
+            tracing::debug!(
+                ?edge,
+                ?active_screen_owner,
+                "edge crossed but no configured/connected neighbor -- staying put and clamping"
+            );
             self.clamp_position_into_active_screen();
             return self
                 .route(InputMessage::MouseMove { dx, dy })
                 .into_iter()
                 .collect();
         }
+        tracing::info!(
+            ?edge,
+            ?old_state,
+            ?new_state,
+            "ownership transition triggered"
+        );
 
         // A real switch. The crossing delta itself is consumed here,
         // not forwarded or injected: the new destination's cursor is
@@ -574,13 +616,54 @@ mod tests {
     }
 
     #[test]
-    fn boundary_coordinate_exactly_at_screen_edge_does_not_switch() {
+    fn a_coordinate_well_inside_the_screen_does_not_switch() {
         let mut router = router_with_right_neighbor();
-        // Move exactly to x=999 (still inside a 1000-wide screen, the
-        // last valid pixel) -- must not switch.
-        let effects = router.handle_captured(InputMessage::MouseMove { dx: 499, dy: 0 });
+        // Move to x=900 on a 1000-wide screen -- comfortably inside
+        // the margin zone, must not switch.
+        let effects = router.handle_captured(InputMessage::MouseMove { dx: 400, dy: 0 });
         assert_eq!(effects, vec![]);
         assert_eq!(router.state(), OwnershipState::Local);
+    }
+
+    /// Regression test for a real Mac->Windows hardware QA failure (see
+    /// ADR-0009's Update note): a real OS cursor is clamped by the OS
+    /// itself and can land a few points short of the nominal screen
+    /// width -- on the hardware that exposed this, a 1470-wide display's
+    /// cursor topped out at x=1468, two points short of the naive
+    /// `x >= width` threshold, so the predicate was never satisfied no
+    /// matter how hard the edge was pushed against. This asserts a
+    /// coordinate within `EDGE_MARGIN` of the boundary (but not
+    /// touching it exactly) still triggers.
+    #[test]
+    fn a_coordinate_within_the_margin_of_the_true_edge_switches_even_short_of_the_exact_boundary() {
+        let mut router = router_with_right_neighbor();
+        // Move to x=998 on a 1000-wide screen (EDGE_MARGIN=4, so the
+        // trigger zone is x >= 996) -- short of the exact boundary
+        // (999/1000) a real clamped cursor might never reach, but must
+        // still switch.
+        let effects = router.handle_captured(InputMessage::MouseMove { dx: 498, dy: 0 });
+        assert!(
+            !effects.is_empty(),
+            "a coordinate within the edge margin must trigger a switch, \
+             matching how a real OS-clamped cursor never quite reaches the exact boundary"
+        );
+        assert!(matches!(router.state(), OwnershipState::Forwarding { .. }));
+    }
+
+    #[test]
+    fn a_coordinate_within_the_margin_of_the_left_edge_switches_too() {
+        // The same margin applies symmetrically to the left/top edges,
+        // which have the identical real-hardware problem: a cursor
+        // clamped at the OS's own minimum never quite reaches x < 0.
+        let layout = layout_with(&[(US, Edge::Left, NEIGHBOR)]);
+        let mut router = Router::new(US, PlatformKind::MacOs, layout, (1000, 800), (500, 400));
+        router.set_peer_connected(NEIGHBOR, (1000, 800));
+
+        // Move to x=2 (within EDGE_MARGIN=4 of the left edge, not
+        // exactly at x=0).
+        let effects = router.handle_captured(InputMessage::MouseMove { dx: -498, dy: 0 });
+        assert!(!effects.is_empty());
+        assert!(matches!(router.state(), OwnershipState::Forwarding { .. }));
     }
 
     #[test]

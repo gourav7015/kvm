@@ -259,6 +259,12 @@ mod real {
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 #[tokio::main]
 async fn main() {
+    // Off by default -- set RUST_LOG=kvm_core=trace (or =debug/=info) to
+    // watch the router's position/edge/ownership decisions live while
+    // diagnosing a real-hardware edge-switch issue. See ADR-0009.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     real::run().await;
 }
 

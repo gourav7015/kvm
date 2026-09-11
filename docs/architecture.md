@@ -205,6 +205,53 @@ channels. Platform-specific code is confined to backend modules inside
   `x11::keymap`'s reverse lookup) — the only change to any pre-existing
   Phase 1–3 code this phase made.
 
+- Phase 4 (edge-based switching, multi-device layout) — **🟡 automated
+  work CLOSED, real hardware QA OPEN.** `core` gained `layout.rs` (a
+  platform-independent `DeviceId`-keyed edge map, never IP-keyed since
+  IPs can change), `ownership.rs` (a pure `Local`/`Forwarding` state
+  machine — deliberately *not* the per-device `Active`/`Passive` model
+  originally sketched in the build plan; see
+  [ADR-0009](adr/0009-edge-switching-architecture.md) decision 2 for
+  why that changed during implementation), `router.rs` (pure
+  edge-detection + modifier-flush-on-switch, wrapping `ownership.rs`),
+  and `session.rs` (the first async layer in this codebase to hold more
+  than one `net::Peer` at once, plus `run_target` for the receiving
+  side and `exchange_screen_size` for real resolution-aware handoff).
+  `input` gained a new, additive `PointerGeometry` trait (absolute
+  cursor position, screen size, cursor warp) implemented for all three
+  existing backends with no new dependencies. `protocol` gained one
+  changed (`SwitchActive` now carries a computed cursor position) and
+  one new (`ScreenInfo`) `ControlMessage` variant — the only two wire
+  touch-points this phase made.
+  Security reuses the existing Phase 1c/2 trust boundary rather than
+  inventing a new one: a device only ever becomes a switch target via
+  `Session::add_peer`, which is only ever called with a `Peer` that
+  already passed `net::connect`/`accept`'s TLS/trust-store
+  verification — a discovered-but-unpaired or revoked device
+  structurally cannot appear as a target, confirmed by tests at both
+  the pure-router and real-`Peer`-integration level.
+  Automated coverage: 48 unit tests (`layout`/`ownership`/`router`, all
+  pure/zero-I/O) plus 7 real-loopback-`Peer` integration tests in
+  `crates/core/tests/session_end_to_end.rs` (edge crossing + cursor
+  warp, screen-size exchange, an unregistered device never becoming a
+  target, disconnect/reconnect without restarting the session,
+  modifier flush landing as ordinary input on the old target, no
+  leakage to an inactive-but-connected peer, rapid back-and-forth
+  re-warping) — none depend on physical hardware.
+  A known, documented limitation (ADR-0009 decision 8, not silently
+  glossed over): every `Capture` backend is listen-only by design
+  (ADR-0007/ADR-0008), so `Router` avoids duplicate *injected* input
+  while `Forwarding`, but cannot yet suppress the local OS's own native
+  handling of captured events — real hardware QA needs to judge how
+  disruptive that is in practice.
+  `crates/core/examples/edge_switch_relay.rs` is the manual-QA tool
+  (a two-device hub/join topology); **real hardware QA against it has
+  not yet been run** — see `docs/manual-qa/phase-4-edge-switching.md`,
+  currently all rows NOT TESTED. **Phase 4 is not closed until that
+  document has real PASS evidence**, per this project's standing rule
+  that a phase's real-hardware DoD items are never marked done from
+  unit tests alone.
+
 ### Manual QA record (all closed)
 
 | Item | Status |

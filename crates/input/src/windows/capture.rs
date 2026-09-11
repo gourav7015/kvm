@@ -11,6 +11,7 @@
 //! state) isn't available since Windows itself calls a plain function
 //! pointer, not a closure.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, mpsc};
 use std::thread;
 
@@ -40,6 +41,17 @@ static SINK: Mutex<Option<mpsc::Sender<InputMessage>>> = Mutex::new(None);
 /// [`InputMessage::MouseMove`] carries. `None` right after (re)starting
 /// capture, until the first move event establishes a baseline.
 static LAST_MOUSE_POS: Mutex<Option<POINT>> = Mutex::new(None);
+
+/// When `true`, both hook procs still report every event to the sink
+/// as normal, but swallow it afterwards (return a non-zero `LRESULT`
+/// instead of calling `CallNextHookEx`) so this machine's own OS never
+/// acts on it. See ADR-0009 decision 9 -- real hardware QA found that,
+/// without this, a machine forwarding input to another device still
+/// visibly moved its own cursor and typed into whatever local window
+/// had focus, which is genuinely disruptive, not merely cosmetic.
+/// Process-wide for the same reason `SINK`/`LAST_MOUSE_POS` are: the
+/// hook procs are bare function pointers with no closure state.
+static SUPPRESS: AtomicBool = AtomicBool::new(false);
 
 fn send(message: InputMessage) {
     if let Ok(guard) = SINK.lock()
@@ -77,6 +89,12 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 repeat: false,
                 source_os: PlatformKind::Windows,
             });
+        }
+        if SUPPRESS.load(Ordering::Relaxed) {
+            // Any non-zero return discards the keystroke -- the
+            // documented `LowLevelKeyboardProc` contract for
+            // "swallow this event", per ADR-0009 decision 9.
+            return LRESULT(1);
         }
     }
     // SAFETY: passing `None` for `hhk` lets Windows resolve the next hook
@@ -127,6 +145,13 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
             }
             _ => {}
         }
+
+        if SUPPRESS.load(Ordering::Relaxed) {
+            // Same "non-zero discards it" contract as
+            // `LowLevelKeyboardProc` -- `LowLevelMouseProc` documents
+            // the identical behavior.
+            return LRESULT(1);
+        }
     }
     // SAFETY: same contract as in `keyboard_hook_proc`.
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -165,6 +190,9 @@ impl Capture for WindowsCapture {
             })?;
             *last = None;
         }
+        // A fresh start() must never inherit a suppressed state from a
+        // previous session.
+        SUPPRESS.store(false, Ordering::Relaxed);
 
         let (setup_tx, setup_rx) = mpsc::channel::<Result<u32, String>>();
 
@@ -230,6 +258,11 @@ impl Capture for WindowsCapture {
         if let Ok(mut guard) = SINK.lock() {
             *guard = None;
         }
+        SUPPRESS.store(false, Ordering::Relaxed);
+    }
+
+    fn set_local_suppression(&mut self, suppress: bool) {
+        SUPPRESS.store(suppress, Ordering::Relaxed);
     }
 }
 

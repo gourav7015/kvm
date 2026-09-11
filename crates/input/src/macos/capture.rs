@@ -3,6 +3,8 @@
 //! OS event loop — no cross-platform translation logic lives here.
 
 use std::cell::Cell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 
@@ -31,12 +33,25 @@ unsafe extern "C" {
 }
 
 /// Global, low-level capture of this machine's keyboard and mouse via a
-/// listen-only `CGEventTap`. Requires Accessibility permission — see
+/// `CGEventTap`. Requires Accessibility permission — see
 /// [`has_accessibility_permission`] and ADR-0007.
+///
+/// The tap is created with `CGEventTapOptions::Default` (not
+/// `ListenOnly`) so it is *capable* of blocking events, but by default
+/// behaves exactly like a listen-only tap: every captured event is
+/// still passed through (`CallbackResult::Keep`) unless
+/// [`set_local_suppression`](Capture::set_local_suppression) has been
+/// called with `true`. See ADR-0009 decision 9 for why: real hardware
+/// QA found that a machine forwarding input to another device still
+/// visibly/audibly acted on it locally too (the cursor kept moving,
+/// keystrokes kept landing in whatever Mac app had focus) — genuinely
+/// disruptive, not merely cosmetic, so this backend now suppresses
+/// local delivery for the duration of a `Forwarding` session.
 #[derive(Default)]
 pub struct MacCapture {
     run_loop: Option<CFRunLoop>,
     thread: Option<thread::JoinHandle<()>>,
+    suppress: Arc<AtomicBool>,
 }
 
 impl MacCapture {
@@ -56,6 +71,7 @@ impl Capture for MacCapture {
         }
 
         let (setup_tx, setup_rx) = mpsc::channel::<Result<CFRunLoop, String>>();
+        let suppress = Arc::clone(&self.suppress);
 
         let join_handle = thread::Builder::new()
             .name("kvm-input-macos-capture".to_string())
@@ -74,7 +90,11 @@ impl Capture for MacCapture {
                 let tap = CGEventTap::new(
                     CGEventTapLocation::HID,
                     CGEventTapPlacement::HeadInsertEventTap,
-                    CGEventTapOptions::ListenOnly,
+                    // `Default`, not `ListenOnly` -- see the struct doc:
+                    // this tap must be *capable* of dropping an event
+                    // (ADR-0009 decision 9), even though by default (see
+                    // the `suppress` check below) it keeps every event.
+                    CGEventTapOptions::Default,
                     events_of_interest,
                     move |proxy, event_type, event| {
                         // Real hardware finding (see ADR-0009's Update
@@ -118,7 +138,15 @@ impl Capture for MacCapture {
                             // capture failure worth surfacing per-event.
                             let _ = sink.send(message);
                         }
-                        CallbackResult::Keep
+                        // Reported to the sink either way (so the
+                        // forwarding target always gets it) -- only
+                        // whether this machine's *own* OS also acts on
+                        // it depends on `suppress` (ADR-0009 decision 9).
+                        if suppress.load(Ordering::Relaxed) {
+                            CallbackResult::Drop
+                        } else {
+                            CallbackResult::Keep
+                        }
                     },
                 );
 
@@ -175,5 +203,13 @@ impl Capture for MacCapture {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        // A fresh start() must never inherit a suppressed state from a
+        // previous session -- same reasoning as `last_flags`/`last_position`
+        // above.
+        self.suppress.store(false, Ordering::Relaxed);
+    }
+
+    fn set_local_suppression(&mut self, suppress: bool) {
+        self.suppress.store(suppress, Ordering::Relaxed);
     }
 }

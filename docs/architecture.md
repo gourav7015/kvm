@@ -230,27 +230,33 @@ channels. Platform-specific code is confined to backend modules inside
   verification — a discovered-but-unpaired or revoked device
   structurally cannot appear as a target, confirmed by tests at both
   the pure-router and real-`Peer`-integration level.
-  Automated coverage: 48 unit tests (`layout`/`ownership`/`router`, all
-  pure/zero-I/O) plus 7 real-loopback-`Peer` integration tests in
+  Automated coverage: 53 unit tests (`layout`/`ownership`/`router`, all
+  pure/zero-I/O) plus 10 real-loopback-`Peer` integration tests in
   `crates/core/tests/session_end_to_end.rs` (edge crossing + cursor
   warp, screen-size exchange, an unregistered device never becoming a
   target, disconnect/reconnect without restarting the session,
   modifier flush landing as ordinary input on the old target, no
   leakage to an inactive-but-connected peer, rapid back-and-forth
-  re-warping) — none depend on physical hardware.
-  A known, documented limitation (ADR-0009 decision 8, not silently
-  glossed over): every `Capture` backend is listen-only by design
-  (ADR-0007/ADR-0008), so `Router` avoids duplicate *injected* input
-  while `Forwarding`, but cannot yet suppress the local OS's own native
-  handling of captured events — real hardware QA needs to judge how
-  disruptive that is in practice.
-  `crates/core/examples/edge_switch_relay.rs` is the manual-QA tool
-  (a two-device hub/join topology); **real hardware QA against it has
-  not yet been run** — see `docs/manual-qa/phase-4-edge-switching.md`,
-  currently all rows NOT TESTED. **Phase 4 is not closed until that
-  document has real PASS evidence**, per this project's standing rule
-  that a phase's real-hardware DoD items are never marked done from
-  unit tests alone.
+  re-warping, `RecenterLocal` reaching `PointerGeometry`, a transient
+  injection failure not killing the session, and local-capture
+  suppression toggling correctly) — none depend on physical hardware.
+  Real Mac<->Windows hardware QA is underway (see
+  `docs/manual-qa/phase-4-edge-switching.md`) and has already driven
+  several real-hardware-only fixes not visible from unit tests alone:
+  raw-HID-delta vs. screen-point mouse tracking, an unreachable
+  OS-clamped edge threshold, self-triggering handoff bounce-back, a
+  pinned local cursor after the first switch, a self-captured synthetic
+  warp event, undetected `CGEventTap` disablement, a single transient
+  injection failure killing the whole target session, a hub that could
+  only ever accept one connection, and — the latest, ADR-0009 decision
+  9 — local input not being suppressed while `Forwarding`, now fixed
+  for macOS and Windows (X11 still carries the older listen-only
+  behavior, tracked for Round B). **Phase 4 is not closed until the
+  manual QA doc has real PASS evidence for every row** (Round A is
+  in progress; Round B/C, multi-device, and the full modifier-safety/
+  disconnected-target/rapid-switching matrix are still open), per this
+  project's standing rule that a phase's real-hardware DoD items are
+  never marked done from unit tests alone.
 
 ### Manual QA record (all closed)
 

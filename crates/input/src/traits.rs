@@ -22,6 +22,21 @@ pub trait Capture: Send {
     /// Stops capturing. Safe to call even if `start` was never called or
     /// already stopped.
     fn stop(&mut self);
+
+    /// While capture keeps running and reporting events to the sink,
+    /// suppresses (`true`) or resumes (`false`) this OS's own delivery
+    /// of that same input to itself. See ADR-0009 decision 8/9: every
+    /// backend was originally listen-only (never blocking), which real
+    /// hardware QA found disruptive — while `Forwarding` to another
+    /// device, the capturing machine's own keyboard/mouse should not
+    /// also keep acting locally.
+    ///
+    /// Default no-op: a backend that hasn't grown a blocking capture
+    /// mode yet simply keeps behaving exactly as before (still
+    /// listen-only) rather than failing to compile or panicking. Not
+    /// every backend needs to implement this on the same day it's
+    /// added elsewhere — see ADR-0009's per-platform rollout note.
+    fn set_local_suppression(&mut self, _suppress: bool) {}
 }
 
 /// Injects a normalized [`InputMessage`] as local keyboard/mouse input.

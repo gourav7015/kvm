@@ -222,6 +222,71 @@ Tracked here as the concrete next architectural step if real hardware
 QA (`docs/manual-qa/phase-4-edge-switching.md`) finds it disruptive in
 practice.
 
+### 9. Local input is now suppressed while `Forwarding` (macOS, Windows) — supersedes decision 8's "known limitation"
+
+**Update (2026-09-11, following real Mac<->Windows manual QA):** decision
+8 flagged that every backend was listen-only and deferred the question
+of whether that would be disruptive in practice to real hardware QA.
+It was: with the mouse forwarding to Windows, the Mac's own cursor kept
+visibly moving and the Mac's own keyboard kept typing into whatever
+local app had focus, at the same time input was correctly being
+forwarded — both keyboard and pointer control need to belong to exactly
+one machine at a time, not silently both.
+
+Implemented, not left deferred further. `Capture` (`crates/input/src/traits.rs`)
+gained one additive method, defaulted to a no-op so no existing backend
+had to change on the same day:
+
+```rust
+fn set_local_suppression(&mut self, suppress: bool) {}
+```
+
+`Session::handle_captured` (`crates/core/src/session.rs`) calls it
+exactly on a `Local`<->`Forwarding` transition (comparing
+`Router::state()` before and after applying that call's effects) —
+never on every captured event, and never redundantly on a multi-hop
+switch that stays `Forwarding` (A hands off to B, then directly to C).
+This mirrors decision 4's modifier-flush timing exactly: a state-
+transition-triggered side effect, not a per-event one.
+
+Implemented for the two backends real hardware QA actually exercised
+so far:
+- **macOS**: the tap is created with `CGEventTapOptions::Default`
+  instead of `ListenOnly` (both already `core-graphics` constants, no
+  new dependency), so it's *capable* of consuming an event
+  (`CallbackResult::Drop`) rather than only ever `Keep`ing it. The
+  event is still converted and sent to the capture sink exactly as
+  before either way — suppression only changes what the callback
+  returns to the OS, never whether the forwarding target hears about
+  it. A shared `Arc<AtomicBool>` (reset to `false` on every fresh
+  `start()`, same hygiene as the existing per-session `Cell`s) carries
+  the toggle from `set_local_suppression` into the tap's callback.
+- **Windows**: `WH_KEYBOARD_LL`/`WH_MOUSE_LL`'s documented contract
+  already provides exactly this mechanism — returning a non-zero
+  `LRESULT` instead of calling `CallNextHookEx` discards the event for
+  every later hook/window in the chain. A process-wide `AtomicBool`
+  (matching the existing `SINK`/`LAST_MOUSE_POS` static pattern, for
+  the same "bare function pointer, no closure state" reason) gates
+  that choice in both hook procs, after the event has already been
+  converted and sent to the sink.
+
+**Not yet implemented, an explicit rollout gap, not silently
+overlooked:** X11 (`crates/input/src/x11/capture.rs`) keeps the
+trait's default no-op. Its raw XI2 capture model has no per-event
+"discard" return value the way macOS/Windows do (ADR-0008 decision 1
+chose raw events specifically *because* the exclusive-grab APIs
+that could block delivery, `XGrabKeyboard`/`XGrabPointer`, are
+unsuitable for an always-on capture session) — a real implementation
+would need to issue a temporary grab only for the duration of a
+`Forwarding` session and release it on return to `Local`, communicated
+into the capture thread's own X connection (which, like the mouse
+position/keymap state already there, isn't reachable from outside that
+thread without a similar dedicated-message mechanism to the existing
+stop-signal `ClientMessage`). Deferred to Round B (Mac<->Linux) of
+Phase 4's manual QA, where it can actually be verified against real
+hardware rather than guessed at — tracked here, not discovered as a
+surprise gap later.
+
 ## Consequences
 
 - `crates/core` gains `layout.rs`, `ownership.rs`, `router.rs`,
@@ -229,21 +294,22 @@ practice.
   at a time. `crates/input` gains `PointerGeometry`, implemented for
   all three existing backends. `crates/protocol` gains one changed and
   one new `ControlMessage` variant.
-- Automated coverage: 48 unit tests in `kvm-core` (`layout`/`ownership`/
-  `router`, all pure, no I/O) plus 7 real-loopback-`Peer` integration
+- Automated coverage: 53 unit tests in `kvm-core` (`layout`/`ownership`/
+  `router`, all pure, no I/O) plus 10 real-loopback-`Peer` integration
   tests in `crates/core/tests/session_end_to_end.rs` covering edge
   crossing + cursor warp, screen-size exchange, an unregistered device
   never becoming a target, disconnect/reconnect without restarting the
   session, modifier flush landing as ordinary input on the old target,
-  no leakage to an inactive-but-connected peer, and rapid back-and-forth
-  re-warping. None of this depends on physical hardware.
+  no leakage to an inactive-but-connected peer, rapid back-and-forth
+  re-warping, `RecenterLocal` actually reaching `PointerGeometry`, a
+  single transient injection failure not killing the session, and
+  local-capture suppression toggling exactly on `Local`/`Forwarding`
+  transitions (decision 9). None of this depends on physical hardware.
 - `crates/core/examples/edge_switch_relay.rs` is the manual-QA tool for
   real hardware, driving `docs/manual-qa/phase-4-edge-switching.md`.
-- Decision 8's limitation means real hardware QA must explicitly judge
-  whether visible local-input duplication during forwarding is
-  disruptive enough to require pulling the blocking-capture work
-  forward — this is a real open question this ADR does not resolve,
-  by design (no arbitrary behavior without evidence).
+- Decision 8's limitation is resolved by decision 9 for macOS and
+  Windows (the two backends real hardware QA has exercised so far);
+  X11 still carries it, tracked for Round B of manual QA.
 - Multi-device (3+) routing is implemented and unit-tested
   (`a_switch_chain_can_continue_onward_to_a_third_device`) but not yet
   exercised on real hardware — only a two-machine hub/join topology has

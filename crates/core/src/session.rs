@@ -17,18 +17,19 @@
 //! synthesizes, which travel as perfectly ordinary [`InputMessage`]s on
 //! that same stream.
 //!
-//! **Known limitation, tracked for a later milestone**: every backend's
-//! `Capture` is listen-only (no exclusive grab — ADR-0007/ADR-0008), so
-//! while `Forwarding`, the capturing device's own OS still visibly
-//! applies captured input locally too, even though `Router` correctly
-//! avoids re-injecting or double-routing it. Actually suppressing local
-//! input while forwarding needs the per-OS `Capture` backends to grow a
-//! blocking mode — real-hardware work for Milestone 4/5, not something
-//! `Session`'s fakes-only integration tests can exercise.
+//! **Local input suppression while forwarding (ADR-0009 decision 9)**:
+//! `handle_captured` toggles `Capture::set_local_suppression` exactly on
+//! `Local`<->`Forwarding` transitions, so the capturing device's own OS
+//! stops visibly acting on captured input for the duration of a
+//! `Forwarding` session (real hardware QA found the original
+//! listen-only-forever behavior genuinely disruptive, not merely
+//! cosmetic). Only macOS/Windows actually implement blocking capture so
+//! far — X11 keeps the trait's default no-op until a later milestone
+//! (see the ADR); this call is harmless either way.
 
 use std::collections::HashMap;
 
-use kvm_input::{Inject, PointerGeometry};
+use kvm_input::{Capture, Inject, PointerGeometry};
 use kvm_net::{NetError, Peer};
 use kvm_protocol::{ControlMessage, DeviceId, InputMessage, Message};
 
@@ -131,13 +132,27 @@ impl Session {
     /// `Forwarding` session, starving further real motion and letting
     /// ordinary hand jitter near the pin flicker ownership back and
     /// forth across `EDGE_MARGIN`).
+    ///
+    /// `local_capture` is the same `Capture` object driving this very
+    /// call (its captured events are what `event` comes from) — used
+    /// only to toggle `set_local_suppression` exactly when ownership
+    /// crosses the `Local`/`Forwarding` boundary (ADR-0009 decision 9),
+    /// never on every event.
     pub async fn handle_captured(
         &mut self,
         event: InputMessage,
         local_geometry: &mut dyn PointerGeometry,
+        local_capture: &mut dyn Capture,
     ) -> Result<(), CoreError> {
+        let was_local = matches!(self.router.state(), OwnershipState::Local);
         for effect in self.router.handle_captured(event) {
             self.apply(effect, local_geometry).await?;
+        }
+        let is_local = matches!(self.router.state(), OwnershipState::Local);
+        if was_local && !is_local {
+            local_capture.set_local_suppression(true);
+        } else if !was_local && is_local {
+            local_capture.set_local_suppression(false);
         }
         Ok(())
     }

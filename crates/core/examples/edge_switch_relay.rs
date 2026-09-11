@@ -228,7 +228,10 @@ mod real {
                         break;
                     };
                     let is_move = matches!(event, InputMessage::MouseMove { .. });
-                    if let Err(e) = session.handle_captured(event, &mut geometry).await {
+                    if let Err(e) = session
+                        .handle_captured(event, &mut geometry, &mut capture)
+                        .await
+                    {
                         eprintln!("session error: {e}");
                     }
                     let state = session.ownership_state();

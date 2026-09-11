@@ -128,6 +128,27 @@ impl PointerGeometry for FakeGeometry {
     }
 }
 
+/// Stands in for a real `Capture` in these fakes-only tests -- records
+/// every `set_local_suppression` call so tests can assert `Session`
+/// toggles it exactly on `Local`<->`Forwarding` transitions (ADR-0009
+/// decision 9), never on every event.
+#[derive(Default)]
+struct FakeCapture {
+    suppression_calls: Vec<bool>,
+}
+
+impl kvm_input::Capture for FakeCapture {
+    fn start(&mut self, _sink: std::sync::mpsc::Sender<InputMessage>) -> Result<(), InputError> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {}
+
+    fn set_local_suppression(&mut self, suppress: bool) {
+        self.suppression_calls.push(suppress);
+    }
+}
+
 struct FakeInject {
     received: Arc<Mutex<Vec<InputMessage>>>,
 }
@@ -187,6 +208,7 @@ async fn edge_crossing_switches_active_target_and_warps_the_targets_cursor() {
     let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
     session.add_peer(b.device_id, peer_a, (1000, 800));
     let mut local_geometry = FakeGeometry::new((500, 400));
+    let mut local_capture = FakeCapture::default();
 
     let target_position = Arc::new(Mutex::new((999, 999)));
     let mut target_geometry = FakeGeometry {
@@ -206,6 +228,7 @@ async fn edge_crossing_switches_active_target_and_warps_the_targets_cursor() {
         .handle_captured(
             InputMessage::MouseMove { dx: 600, dy: 0 },
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
@@ -226,6 +249,7 @@ async fn edge_crossing_switches_active_target_and_warps_the_targets_cursor() {
         .handle_captured(
             InputMessage::MouseMove { dx: 10, dy: 5 },
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
@@ -281,6 +305,7 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
     let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
     session.add_peer(b.device_id, peer_a, (1000, 800));
     let mut local_geometry = FakeGeometry::new((500, 400));
+    let mut local_capture = FakeCapture::default();
 
     let target_position = Arc::new(Mutex::new((999, 999)));
     let mut target_geometry = FakeGeometry {
@@ -305,6 +330,7 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
             .handle_captured(
                 InputMessage::MouseMove { dx: 600, dy: 0 },
                 &mut local_geometry,
+                &mut local_capture,
             )
             .await
             .unwrap();
@@ -324,6 +350,7 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
             .handle_captured(
                 InputMessage::MouseMove { dx: -1100, dy: 0 },
                 &mut local_geometry,
+                &mut local_capture,
             )
             .await
             .unwrap();
@@ -337,6 +364,7 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
             .handle_captured(
                 InputMessage::MouseMove { dx: 600, dy: 0 },
                 &mut local_geometry,
+                &mut local_capture,
             )
             .await
             .unwrap();
@@ -358,6 +386,7 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
             .handle_captured(
                 InputMessage::MouseMove { dx: -1100, dy: 0 },
                 &mut local_geometry,
+                &mut local_capture,
             )
             .await
             .unwrap();
@@ -381,11 +410,13 @@ async fn an_unregistered_device_can_never_become_a_target_even_if_the_layout_nam
     let layout = two_device_layout(a.device_id, untrusted_id);
     let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
     let mut local_geometry = FakeGeometry::new((500, 400));
+    let mut local_capture = FakeCapture::default();
 
     session
         .handle_captured(
             InputMessage::MouseMove { dx: 600, dy: 0 },
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
@@ -403,11 +434,13 @@ async fn disconnect_then_reconnect_recovers_ownership_without_restarting_the_ses
     let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
     session.add_peer(b.device_id, peer_a, (1000, 800));
     let mut local_geometry = FakeGeometry::new((500, 400));
+    let mut local_capture = FakeCapture::default();
 
     session
         .handle_captured(
             InputMessage::MouseMove { dx: 600, dy: 0 },
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
@@ -433,6 +466,7 @@ async fn disconnect_then_reconnect_recovers_ownership_without_restarting_the_ses
         .handle_captured(
             InputMessage::MouseMove { dx: 1, dy: 1 },
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
@@ -445,6 +479,7 @@ async fn disconnect_then_reconnect_recovers_ownership_without_restarting_the_ses
         .handle_captured(
             InputMessage::MouseMove { dx: 600, dy: 0 },
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
@@ -484,12 +519,14 @@ async fn switching_to_a_new_target_flushes_held_modifiers_on_the_old_one_as_ordi
     session.add_peer(b.device_id, peer_a_b, (1000, 800));
     session.add_peer(c.device_id, peer_a_c, (1000, 800));
     let mut local_geometry = FakeGeometry::new((500, 400));
+    let mut local_capture = FakeCapture::default();
 
     // -> Forwarding(B); hold Shift on B.
     session
         .handle_captured(
             InputMessage::MouseMove { dx: 600, dy: 0 },
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
@@ -497,6 +534,7 @@ async fn switching_to_a_new_target_flushes_held_modifiers_on_the_old_one_as_ordi
         .handle_captured(
             key_event(Key::ShiftLeft, ButtonState::Pressed),
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
@@ -507,6 +545,7 @@ async fn switching_to_a_new_target_flushes_held_modifiers_on_the_old_one_as_ordi
         .handle_captured(
             InputMessage::MouseMove { dx: 1100, dy: 0 },
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
@@ -587,16 +626,22 @@ async fn only_the_active_target_receives_input_never_an_inactive_connected_peer(
     session.add_peer(b.device_id, peer_a_b, (1000, 800));
     session.add_peer(c.device_id, peer_a_c, (1000, 800));
     let mut local_geometry = FakeGeometry::new((500, 400));
+    let mut local_capture = FakeCapture::default();
 
     session
         .handle_captured(
             InputMessage::MouseMove { dx: 600, dy: 0 },
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
     session
-        .handle_captured(key_event(Key::A, ButtonState::Pressed), &mut local_geometry)
+        .handle_captured(
+            key_event(Key::A, ButtonState::Pressed),
+            &mut local_geometry,
+            &mut local_capture,
+        )
         .await
         .unwrap();
 
@@ -645,6 +690,7 @@ async fn recentering_the_local_cursor_is_actually_applied_via_pointer_geometry()
     // Start pinned near our own right edge -- exactly the scenario
     // that triggered the real bug.
     let mut local_geometry = FakeGeometry::new((990, 400));
+    let mut local_capture = FakeCapture::default();
 
     let target_task = tokio::spawn(async move {
         let mut geometry = FakeGeometry::new((0, 0));
@@ -658,6 +704,7 @@ async fn recentering_the_local_cursor_is_actually_applied_via_pointer_geometry()
         .handle_captured(
             InputMessage::MouseMove { dx: 600, dy: 0 },
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
@@ -689,6 +736,7 @@ async fn a_single_transient_injection_failure_does_not_kill_the_whole_session() 
     let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
     session.add_peer(b.device_id, peer_a, (1000, 800));
     let mut local_geometry = FakeGeometry::new((500, 400));
+    let mut local_capture = FakeCapture::default();
 
     let received = Arc::new(Mutex::new(Vec::new()));
     let target_task = {
@@ -713,6 +761,7 @@ async fn a_single_transient_injection_failure_does_not_kill_the_whole_session() 
         .handle_captured(
             InputMessage::MouseMove { dx: 600, dy: 0 },
             &mut local_geometry,
+            &mut local_capture,
         )
         .await
         .unwrap();
@@ -727,6 +776,7 @@ async fn a_single_transient_injection_failure_does_not_kill_the_whole_session() 
                     dy: delta.1,
                 },
                 &mut local_geometry,
+                &mut local_capture,
             )
             .await
             .unwrap();
@@ -757,4 +807,116 @@ async fn a_single_transient_injection_failure_does_not_kill_the_whole_session() 
 
     drop(session);
     let _ = target_task.await;
+}
+
+#[tokio::test]
+async fn local_capture_is_suppressed_exactly_on_local_forwarding_transitions() {
+    // Regression test for real Mac->Windows hardware QA (see ADR-0009
+    // decision 9): the capturing device's own OS must stop acting on
+    // captured input for the duration of a `Forwarding` session --
+    // toggled exactly on the `Local`<->`Forwarding` boundary, not on
+    // every single captured event (which would be wasted, and would
+    // make an eventual real-hardware unsuppress/suppress flicker if a
+    // backend's toggle call is itself non-trivial).
+    let a = Device::new([26u8; 32]);
+    let b = Device::new([27u8; 32]);
+    let c = Device::new([28u8; 32]);
+    let (peer_a_b, _peer_b) = connect_pair(&a, &b).await;
+    let (peer_a_c, _peer_c) = connect_pair(&a, &c).await;
+
+    let mut layout = Layout::new();
+    for (id, label) in [(a.device_id, "a"), (b.device_id, "b"), (c.device_id, "c")] {
+        layout.add_device(LayoutDevice {
+            device_id: id,
+            label: label.to_string(),
+            enabled: true,
+        });
+    }
+    layout
+        .set_neighbor(a.device_id, Edge::Right, b.device_id)
+        .unwrap();
+    layout
+        .set_neighbor(b.device_id, Edge::Right, c.device_id)
+        .unwrap();
+    layout
+        .set_neighbor(c.device_id, Edge::Left, b.device_id)
+        .unwrap();
+    layout
+        .set_neighbor(b.device_id, Edge::Left, a.device_id)
+        .unwrap();
+
+    let mut session = Session::new(a.device_id, layout, (1000, 800), (500, 400));
+    session.add_peer(b.device_id, peer_a_b, (1000, 800));
+    session.add_peer(c.device_id, peer_a_c, (1000, 800));
+    let mut local_geometry = FakeGeometry::new((500, 400));
+    let mut local_capture = FakeCapture::default();
+
+    // Local -> Forwarding(B): must suppress.
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert_eq!(local_capture.suppression_calls, vec![true]);
+
+    // An ordinary forwarded move while already Forwarding must not
+    // toggle suppression again.
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 1, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert_eq!(local_capture.suppression_calls, vec![true]);
+
+    // Forwarding(B) -> Forwarding(C), a switch that never passes
+    // through Local: suppression is already on and must stay on,
+    // without an extra redundant toggle.
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 1100, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.ownership_state(),
+        OwnershipState::Forwarding { target, .. } if target == c.device_id
+    ));
+    assert_eq!(local_capture.suppression_calls, vec![true]);
+
+    // Forwarding(C) -> Forwarding(B): C's configured Left neighbor is
+    // B, not A, so this one crossing lands back on B, not directly on
+    // Local -- suppression must still not toggle.
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: -1100, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.ownership_state(),
+        OwnershipState::Forwarding { target, .. } if target == b.device_id
+    ));
+    assert_eq!(local_capture.suppression_calls, vec![true]);
+
+    // Forwarding(B) -> Local: must resume (unsuppress).
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: -1100, dy: 0 },
+            &mut local_geometry,
+            &mut local_capture,
+        )
+        .await
+        .unwrap();
+    assert_eq!(session.ownership_state(), OwnershipState::Local);
+    assert_eq!(local_capture.suppression_calls, vec![true, false]);
 }

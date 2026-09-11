@@ -200,29 +200,87 @@ mod real {
              edge to switch, cross back the other way to return"
         );
 
-        let mut last_state = session.ownership_state();
-        while let Ok(event) = source.recv() {
-            let is_move = matches!(event, InputMessage::MouseMove { .. });
-            if let Err(e) = session.handle_captured(event, &mut geometry).await {
-                eprintln!("session error: {e}");
-            }
-            let state = session.ownership_state();
-            if state != last_state {
-                println!("ownership changed: {last_state:?} -> {state:?}");
-                if state == OwnershipState::Local
-                    && let Ok(pos) = geometry.cursor_position()
-                {
-                    session.resync_local_position(pos.0, pos.1);
-                    println!("resynced local cursor position to {pos:?}");
+        // Bridge the blocking std::sync::mpsc capture channel onto a
+        // tokio channel (same pattern as `input_bridge::forward_capture_to_peer`)
+        // so this loop can `select!` between captured events and new
+        // incoming connections. Without this, `endpoint.accept()` is
+        // never polled again after the first connection, and a real
+        // hardware disconnect (network blip, sleep/wake, anything not
+        // caused by a code bug -- see ADR-0009's Update note) leaves
+        // no way back in short of killing and restarting this whole
+        // process, contradicting the Phase 4 DoD's explicit
+        // "reconnection must work without app restart."
+        let (async_tx, mut async_rx) = tokio::sync::mpsc::unbounded_channel();
+        std::thread::spawn(move || {
+            while let Ok(event) = source.recv() {
+                if async_tx.send(event).is_err() {
+                    break;
                 }
-                last_state = state;
-            } else if is_move {
-                // Only mouse moves can change ownership; everything
-                // else (keys, buttons, scroll) never does, so this
-                // branch is the "nothing changed" common case for
-                // moves specifically — deliberately not logged, to
-                // avoid the excessive per-event noise the kickoff
-                // warns against.
+            }
+        });
+
+        let mut last_state = session.ownership_state();
+        loop {
+            tokio::select! {
+                event = async_rx.recv() => {
+                    let Some(event) = event else {
+                        println!("capture ended");
+                        break;
+                    };
+                    let is_move = matches!(event, InputMessage::MouseMove { .. });
+                    if let Err(e) = session.handle_captured(event, &mut geometry).await {
+                        eprintln!("session error: {e}");
+                    }
+                    let state = session.ownership_state();
+                    if state != last_state {
+                        println!("ownership changed: {last_state:?} -> {state:?}");
+                        if state == OwnershipState::Local
+                            && let Ok(pos) = geometry.cursor_position()
+                        {
+                            session.resync_local_position(pos.0, pos.1);
+                            println!("resynced local cursor position to {pos:?}");
+                        }
+                        last_state = state;
+                    } else if is_move {
+                        // Only mouse moves can change ownership; everything
+                        // else (keys, buttons, scroll) never does, so this
+                        // branch is the "nothing changed" common case for
+                        // moves specifically — deliberately not logged, to
+                        // avoid the excessive per-event noise the kickoff
+                        // warns against.
+                    }
+                }
+                incoming = endpoint.accept() => {
+                    let Some(incoming) = incoming else {
+                        println!("endpoint closed");
+                        break;
+                    };
+                    match kvm_net::accept(incoming, our_device_id).await {
+                        Ok(mut new_peer) => {
+                            if new_peer.remote_device_id != peer_device_id {
+                                eprintln!(
+                                    "rejecting connection from unexpected device {:?} \
+                                     (only {peer_device_id:?} is configured in this layout)",
+                                    new_peer.remote_device_id
+                                );
+                                continue;
+                            }
+                            match exchange_screen_size(&mut new_peer, our_screen_size).await {
+                                Ok(new_screen_size) => {
+                                    println!(
+                                        "peer reconnected, screen size: {new_screen_size:?} \
+                                         -- no restart needed"
+                                    );
+                                    session.add_peer(peer_device_id, new_peer, new_screen_size);
+                                }
+                                Err(e) => {
+                                    eprintln!("screen-size exchange failed on reconnect: {e}");
+                                }
+                            }
+                        }
+                        Err(e) => eprintln!("failed to accept a reconnect attempt: {e}"),
+                    }
+                }
             }
         }
     }

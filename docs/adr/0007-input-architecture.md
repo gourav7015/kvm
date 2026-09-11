@@ -45,10 +45,20 @@ Fully unit-tested as a pure function (`modifier_transition`, given
 already-extracted flags values, no real `CGEvent` needed) — the actual
 `CGEvent` field extraction around it stays the untested "thin shim",
 per this ADR's own HAL-split rationale. This closes the "Mac
-Command press is never captured" gap; it does **not** add
-concurrent-modifier-state to non-modifier keys (a real Mac-side Cmd+C
-still sends only a plain `C`, no indication Command was held) — that
-remains a separate, larger, not-yet-scoped piece of work.
+Command press is never captured" gap.
+
+Initially assumed (incorrectly) that real shortcut *combinations* would
+still be broken, on the theory that `InputMessage::Key` carries no
+"concurrently held modifiers" field so a letter's own event wouldn't
+know Command was held alongside it. Real-hardware retest disproved
+this: Cmd+A, Cmd+X, and Cmd+V on the Mac all landed on Windows as
+Ctrl+A/X/V — real, functional shortcuts. No protocol change was
+needed, because Command and the letter are each captured and injected
+as their own independently-ordered press/release events, and the
+injecting OS's own keyboard state tracking reconstructs "Ctrl down,
+then A down" from that ordered stream exactly as it would from two
+fingers on a real keyboard — the same mechanism that already made
+mouse-drag-while-a-key-is-held work without any special-casing.
 
 ## Context
 

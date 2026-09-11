@@ -134,11 +134,13 @@ channels. Platform-specific code is confined to backend modules inside
   the capture backend dropped unconditionally), blocking Mac→Windows
   Command→Control translation; fixed by diffing modifier flags across
   events, confirmed on real hardware (`docs/manual-qa/phase-3-input.md`).
-  Still open beyond the UAC item: `InputMessage::Key` carries no
-  concurrently-held-modifiers field, so a real shortcut *combination*
-  like Cmd+C still sends only the plain letter — the standalone tap fix
-  doesn't cover that, and it's separate, not-yet-scoped work. `protocol`
-  gained a normalized `Key`/`PlatformKind`
+  Real shortcut combinations (Cmd+A/X/V on the Mac landing as Ctrl+A/X/V
+  on Windows) are confirmed working too — each key, modifier or not, is
+  captured and injected as its own independently-ordered event, and the
+  receiving OS's own keyboard state tracking reconstructs the
+  combination correctly; no protocol change for "concurrently held
+  modifiers" turned out to be needed. `protocol` gained a normalized
+  `Key`/`PlatformKind`
   instead of a raw OS keycode; `input` gained the `Capture`/`Inject`
   trait boundary, a pure OS-independent modifier-translation function
   (the killer feature: Command↔Control swap only when exactly one side
@@ -193,7 +195,7 @@ Mac→Windows translation until fixed.
 | **Command (Mac) → Control (Windows) translation** | ✅ PASS (after the `FlagsChanged` fix) — confirmed with reproducible log evidence (real bare Command press on the Mac captured, translated to `ControlLeft`, and injected on Windows) |
 | Option↔Alt never translates | ✅ PASS, both directions |
 | End-to-end input latency measured and logged (`examples/input_relay.rs`) | ✅ PASS — network RTT 7.9–15.0ms, injection calls ~70–700µs typical (Mac CGEvent and Windows SendInput both), felt latency acceptable for interactive use |
-| Modifier state on a shortcut *combination* (e.g. does Cmd+C carry "Command held" alongside `C`) | ⬜ OPEN — not part of this fix; `InputMessage::Key` still has no concurrent-modifiers field, separate not-yet-scoped work |
+| Real shortcut combinations (Cmd+A/X/V on Mac → Ctrl+A/X/V on Windows) | ✅ PASS — confirmed on real hardware; each key's own independently-ordered press/release event is sufficient, no "concurrent modifiers" field needed |
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
 phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

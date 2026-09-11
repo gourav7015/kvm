@@ -99,11 +99,21 @@ mishandled: holding both keys of one modifier category (e.g. both Shift
 keys) and releasing one — `CGEventFlags` has one bit per category, not
 per key, so that can't be told apart from "nothing changed" and is
 reported as no event rather than guessed at; and Caps Lock, whose flag
-is a toggle rather than a held-state. Also still open: `InputMessage::Key`
-carries no "concurrently held modifiers" field, so a real Mac-side
-combo like Cmd+C still sends only a plain `Key::C` — the standalone tap
-is fixed, but a shortcut *combination* still doesn't carry modifier
-info. That remains a separate, not-yet-scoped piece of work.
+is a toggle rather than a held-state.
+
+**Real shortcut combinations confirmed working, not just bare taps.**
+Tested Cmd+A, Cmd+X, and Cmd+V on the Mac — all three landed on Windows
+as Ctrl+A, Ctrl+X, Ctrl+V (select-all, cut, paste) respectively, i.e.
+real, functional shortcuts, not just isolated key presses. This was initially
+assumed *not* to work, on the theory that `InputMessage::Key` carries no
+"concurrently held modifiers" field so a letter's own event wouldn't
+know Command was held — but that concern doesn't actually apply: each
+key (modifier or not) is captured and injected as its own independent,
+correctly-ordered press/release event, and Windows' own keyboard state
+tracking reconstructs "Ctrl is down, then A goes down" from that ordered
+stream exactly as it would for two fingers on a real keyboard. No
+protocol change was needed. This closes out what was previously listed
+as a real limitation.
 
 ### Round 2 — Windows capture → Mac inject
 

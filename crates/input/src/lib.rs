@@ -24,7 +24,7 @@ mod windows;
 mod x11;
 
 pub use error::InputError;
-pub use traits::{Capture, Inject};
+pub use traits::{Capture, Inject, PointerGeometry};
 pub use translate::translate_for_target;
 
 #[cfg(target_os = "macos")]

@@ -1,5 +1,6 @@
 //! macOS injection via synthetic `CGEvent`s posted at the HID level.
 
+use core_graphics::display::CGDisplay;
 use core_graphics::event::{CGEvent, CGEventTapLocation, CGMouseButton, ScrollEventUnit};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
@@ -8,7 +9,7 @@ use kvm_protocol::{ButtonState, InputMessage, MouseButton};
 use crate::error::InputError;
 use crate::macos::keycode::key_to_keycode;
 use crate::macos::permission::has_accessibility_permission;
-use crate::traits::Inject;
+use crate::traits::{Inject, PointerGeometry};
 
 #[derive(Default)]
 pub struct MacInject;
@@ -114,6 +115,45 @@ impl Inject for MacInject {
                 Ok(())
             }
         }
+    }
+}
+
+impl PointerGeometry for MacInject {
+    fn cursor_position(&self) -> Result<(i32, i32), InputError> {
+        // Same call `inject`'s MouseMove/MouseButton arms already use to
+        // read the current pointer location — reused verbatim, just
+        // exposed as a public query instead of an internal step.
+        let location = CGEvent::new(event_source()?)
+            .map_err(|()| {
+                InputError::InjectFailed("failed to read current pointer location".to_string())
+            })?
+            .location();
+        Ok((location.x as i32, location.y as i32))
+    }
+
+    fn screen_size(&self) -> Result<(u32, u32), InputError> {
+        let display = CGDisplay::main();
+        let bounds = display.bounds();
+        Ok((bounds.size.width as u32, bounds.size.height as u32))
+    }
+
+    fn set_cursor_position(&mut self, x: i32, y: i32) -> Result<(), InputError> {
+        let target = CGPoint {
+            x: x as f64,
+            y: y as f64,
+        };
+        let source = event_source()?;
+        let cg_event = CGEvent::new_mouse_event(
+            source,
+            core_graphics::event::CGEventType::MouseMoved,
+            target,
+            CGMouseButton::Left,
+        )
+        .map_err(|()| {
+            InputError::InjectFailed("failed to create mouse-move CGEvent".to_string())
+        })?;
+        cg_event.post(CGEventTapLocation::HID);
+        Ok(())
     }
 }
 

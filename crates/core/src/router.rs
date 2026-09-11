@@ -277,20 +277,43 @@ impl Router {
         // not forwarded or injected: the new destination's cursor is
         // placed explicitly via `Effect::Switch`'s `cursor_position`,
         // not by relaying this one boundary-triggering delta.
-        self.state = new_state;
         let mut effects = self.flush_held_keys(old_state);
         match new_state {
             OwnershipState::Forwarding {
                 target,
                 virtual_cursor,
             } => {
-                self.position = virtual_cursor;
+                // `entry_position` places the handoff exactly on the
+                // destination's boundary (x=0 for a Right-edge entry,
+                // etc.) -- which, found via real Mac->Windows hardware
+                // QA (see ADR-0009's Update note), sits *inside* our
+                // own EDGE_MARGIN trigger zone for the opposite edge.
+                // Landing there without adjustment immediately
+                // satisfies "crossed the edge back home" on literally
+                // the next captured event, bouncing straight back
+                // before the user can do anything. Nudge inward past
+                // the margin so the landing spot isn't self-triggering.
+                // `self.state` is set to the *nudged* value here (not
+                // the blanket `new_state` from `transition`), so
+                // `state()`/`self.position` never disagree about where
+                // the handoff actually landed.
+                let landing = self
+                    .screen_sizes
+                    .get(&target)
+                    .map(|&size| nudge_off_boundary(edge, virtual_cursor, size))
+                    .unwrap_or(virtual_cursor);
+                self.state = OwnershipState::Forwarding {
+                    target,
+                    virtual_cursor: landing,
+                };
+                self.position = landing;
                 effects.push(Effect::Switch {
                     to: target,
-                    cursor_position: virtual_cursor,
+                    cursor_position: landing,
                 });
             }
             OwnershipState::Local => {
+                self.state = OwnershipState::Local;
                 // Returned home. We have no ground truth for where the
                 // real local cursor now sits — the caller resyncs via
                 // `resync_position` from a live OS read; until then,
@@ -336,6 +359,25 @@ impl Router {
             .collect();
         self.held_keys.clear();
         effects
+    }
+}
+
+/// Moves a boundary-exact handoff position (from [`entry_position`])
+/// safely past [`EDGE_MARGIN`] on the entered screen, so the landing
+/// spot itself doesn't immediately re-satisfy the opposite edge's
+/// trigger zone. `edge` is the edge that was crossed on the *source*
+/// screen (same meaning as [`entry_position`]'s `edge` parameter) --
+/// crossing a source's `Right` edge lands on the destination's `Left`
+/// edge, so that's the axis nudged inward (positive x); symmetrically
+/// for the other three.
+fn nudge_off_boundary(edge: Edge, position: (i32, i32), screen_size: (u32, u32)) -> (i32, i32) {
+    let inset = EDGE_MARGIN + 1;
+    let (x, y) = position;
+    match edge {
+        Edge::Right => (inset, y),
+        Edge::Left => (screen_size.0 as i32 - 1 - inset, y),
+        Edge::Bottom => (x, inset),
+        Edge::Top => (x, screen_size.1 as i32 - 1 - inset),
     }
 }
 
@@ -407,19 +449,23 @@ mod tests {
     fn crossing_right_edge_switches_and_does_not_forward_the_triggering_delta() {
         let mut router = router_with_right_neighbor();
         // Push from x=500 past x=1000 (screen width) -> crosses Right.
+        // The landing lands nudged in from the exact boundary (x=0) by
+        // EDGE_MARGIN+1 -- see `nudge_off_boundary`'s doc comment for
+        // why landing exactly on the boundary is itself a real-hardware
+        // bug (ADR-0009's Update note).
         let effects = router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
         assert_eq!(
             effects,
             vec![Effect::Switch {
                 to: NEIGHBOR,
-                cursor_position: (0, 400),
+                cursor_position: (5, 400),
             }]
         );
         assert_eq!(
             router.state(),
             OwnershipState::Forwarding {
                 target: NEIGHBOR,
-                virtual_cursor: (0, 400),
+                virtual_cursor: (5, 400),
             }
         );
     }
@@ -596,7 +642,7 @@ mod tests {
             effects,
             vec![Effect::Switch {
                 to: NEIGHBOR,
-                cursor_position: (0, 400),
+                cursor_position: (5, 400),
             }]
         );
     }
@@ -674,13 +720,91 @@ mod tests {
 
         let effects = router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
         // Halfway down an 800-tall source screen -> halfway down a
-        // 2000-tall destination screen.
+        // 2000-tall destination screen (x nudged in from the exact
+        // boundary by EDGE_MARGIN+1 -- see `nudge_off_boundary`).
         assert_eq!(
             effects,
             vec![Effect::Switch {
                 to: NEIGHBOR,
-                cursor_position: (0, 1000),
+                cursor_position: (5, 1000),
             }]
+        );
+    }
+
+    #[test]
+    fn landing_on_a_new_target_never_lands_inside_its_own_edge_margin() {
+        // Regression test for a real Mac->Windows hardware QA failure
+        // (see ADR-0009's Update note): entry_position() lands exactly
+        // on the destination's boundary, which -- once EDGE_MARGIN
+        // exists -- is itself inside the trigger zone for the opposite
+        // edge, causing an immediate, unrequested bounce back to the
+        // previous owner on the very next captured event, milliseconds
+        // after the switch (confirmed live via tracing on real
+        // hardware: Local -> Forwarding -> Local within ~10ms with no
+        // user input in between). Asserts the landing position is
+        // never within EDGE_MARGIN of any boundary, for all four edges.
+        for (edge, dx, dy) in [
+            (Edge::Right, 600, 0),
+            (Edge::Left, -600, 0),
+            (Edge::Bottom, 0, 600),
+            (Edge::Top, 0, -600),
+        ] {
+            let layout = layout_with(&[(US, edge, NEIGHBOR)]);
+            let mut router = Router::new(US, PlatformKind::MacOs, layout, (1000, 800), (500, 400));
+            router.set_peer_connected(NEIGHBOR, (1000, 800));
+
+            let effects = router.handle_captured(InputMessage::MouseMove { dx, dy });
+            let Some(Effect::Switch {
+                cursor_position, ..
+            }) = effects.first()
+            else {
+                panic!("expected a Switch effect for {edge:?}, got {effects:?}");
+            };
+            assert!(
+                cursor_position.0 > EDGE_MARGIN && cursor_position.0 < 1000 - EDGE_MARGIN,
+                "{edge:?}: landing x={} is within the edge margin (0..={EDGE_MARGIN} or >={}) -- \
+                 would immediately re-trigger a bounce back",
+                cursor_position.0,
+                1000 - EDGE_MARGIN,
+            );
+            assert!(
+                cursor_position.1 > EDGE_MARGIN && cursor_position.1 < 800 - EDGE_MARGIN,
+                "{edge:?}: landing y={} is within the edge margin",
+                cursor_position.1,
+            );
+        }
+    }
+
+    /// Regression test for a second real bug found while fixing the
+    /// first: `state()` was reporting the *unnudged*, exact-boundary
+    /// `virtual_cursor` (from `ownership::transition`'s return value)
+    /// even after `self.position` and the `Effect::Switch` sent to the
+    /// target were correctly nudged -- an internal inconsistency where
+    /// the router's own reported state disagreed with the position it
+    /// was actually tracking and the position it told the target to
+    /// warp to. Caught immediately by the test above failing with
+    /// `state()` still showing `(0, 400)` while the effect correctly
+    /// showed `(5, 400)`.
+    #[test]
+    fn reported_state_agrees_with_the_position_actually_sent_to_the_target() {
+        let mut router = router_with_right_neighbor();
+        let effects = router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
+        let Some(Effect::Switch {
+            cursor_position, ..
+        }) = effects.first()
+        else {
+            panic!("expected a Switch effect, got {effects:?}");
+        };
+        let OwnershipState::Forwarding {
+            virtual_cursor: reported,
+            ..
+        } = router.state()
+        else {
+            panic!("expected Forwarding, got {:?}", router.state());
+        };
+        assert_eq!(
+            *cursor_position, reported,
+            "the effect sent to the target and router.state()'s virtual_cursor must never disagree"
         );
     }
 }

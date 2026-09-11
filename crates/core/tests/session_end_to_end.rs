@@ -178,7 +178,10 @@ async fn edge_crossing_switches_active_target_and_warps_the_targets_cursor() {
         session.ownership_state(),
         OwnershipState::Forwarding {
             target: b.device_id,
-            virtual_cursor: (0, 400),
+            // Nudged in from the exact boundary (x=0) by
+            // EDGE_MARGIN+1 -- landing exactly on the boundary is
+            // itself a real-hardware bug (see ADR-0009's Update note).
+            virtual_cursor: (5, 400),
         }
     );
 
@@ -201,7 +204,7 @@ async fn edge_crossing_switches_active_target_and_warps_the_targets_cursor() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    assert_eq!(*target_position.lock().unwrap(), (0, 400));
+    assert_eq!(*target_position.lock().unwrap(), (5, 400));
     assert_eq!(
         *target_received.lock().unwrap(),
         vec![InputMessage::MouseMove { dx: 10, dy: 5 }]
@@ -282,7 +285,8 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
         assert_eq!(session.ownership_state(), OwnershipState::Local);
         session.resync_local_position(500, 400);
 
-        // -> Forwarding(B) again: must re-warp to (0, 400), not
+        // -> Forwarding(B) again: must re-warp to (5, 400) (nudged in
+        // from the exact boundary -- see ADR-0009's Update note), not
         // silently leave B's cursor at the perturbed (777, 777).
         session
             .handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 })
@@ -291,12 +295,12 @@ async fn rapid_back_and_forth_re_warps_the_targets_cursor_on_every_return() {
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if *target_position.lock().unwrap() == (0, 400) {
+            if *target_position.lock().unwrap() == (5, 400) {
                 break;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "round {round}: timed out waiting for B's cursor to be re-warped to (0, 400)"
+                "round {round}: timed out waiting for B's cursor to be re-warped to (5, 400)"
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }

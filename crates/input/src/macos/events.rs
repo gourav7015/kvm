@@ -3,6 +3,7 @@
 //! conversion, no cross-platform logic.
 
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventType, EventField};
+use core_graphics::geometry::CGPoint;
 use kvm_protocol::{ButtonState, InputMessage, Key, MouseButton, PlatformKind};
 
 use crate::macos::keycode::keycode_to_key;
@@ -56,16 +57,21 @@ pub const CAPTURED_EVENT_TYPES: &[CGEventType] = &[
 /// `FlagsChanged` transition that can't be disambiguated — see
 /// [`modifier_transition`]).
 ///
-/// `last_flags` carries state across calls within one capture session
-/// (owned by the caller — see [`crate::macos::capture`] — and expected
-/// to start at [`CGEventFlags::empty`] each time capture (re)starts),
-/// because a `FlagsChanged` event only reports the *current* combined
-/// flags, not which direction the specific key that triggered it just
-/// moved. Mouse motion needs no such state: see [`mouse_delta`].
+/// `last_flags` and `post_warp_anchor` carry state across calls within
+/// one capture session (owned by the caller — see
+/// [`crate::macos::capture`] — and expected to start at
+/// [`CGEventFlags::empty`]/`None` each time capture (re)starts):
+/// `last_flags` because a `FlagsChanged` event only reports the
+/// *current* combined flags, not which direction the specific key that
+/// triggered it just moved; `post_warp_anchor` because the first real
+/// motion event after one of this process's own warps carries the
+/// warp's displacement in its delta fields — see [`mouse_delta`] and
+/// ADR-0009 decision 18.
 pub fn to_input_message(
     event_type: CGEventType,
     event: &CGEvent,
     last_flags: &mut CGEventFlags,
+    post_warp_anchor: &mut Option<CGPoint>,
 ) -> Option<InputMessage> {
     match event_type {
         CGEventType::KeyDown | CGEventType::KeyUp => {
@@ -101,29 +107,40 @@ pub fn to_input_message(
         | CGEventType::LeftMouseDragged
         | CGEventType::RightMouseDragged
         | CGEventType::OtherMouseDragged => {
+            let location = event.location();
             if is_our_own_synthetic_event(event) {
-                // See `SYNTHETIC_EVENT_MARKER`. Nothing to re-anchor:
-                // each event's motion is now self-contained, so a warp
-                // this process posted simply isn't reported, with no
-                // effect on how the next real event is interpreted.
+                // See `SYNTHETIC_EVENT_MARKER` -- never reported as user
+                // motion. But remember where it landed: the very next
+                // *real* event's delta fields still include this warp's
+                // displacement (see `mouse_delta` / ADR-0009 decision
+                // 18), so that one event is measured from here instead.
+                *post_warp_anchor = Some(location);
                 return None;
             }
-            let (dx, dy) = mouse_delta(event);
+            let raw = mouse_delta(event);
+            let anchor = post_warp_anchor.take();
+            let (dx, dy) = match anchor {
+                Some(anchor) => anchored_delta(anchor, location),
+                None => raw,
+            };
             // Stage 1 of the "follow one physical movement through the
             // whole pipeline" trace (stages 2-4: `core::router`,
-            // `core::session`, `windows::inject`). `location` is logged
-            // alongside the delta purely as the diagnostic that made
-            // this bug visible -- once the pointer is pushed past the
-            // Mac's own display bounds, `location` pins at the boundary
-            // while `dx`/`dy` keep reporting real motion. They are now
-            // independent readings; before the fix below, they weren't.
-            let location = event.location();
+            // `core::session`, `windows::inject`). Once the pointer is
+            // pushed past the Mac's own display bounds, `loc_x`/`loc_y`
+            // pin at the boundary while `dx`/`dy` keep reporting real
+            // motion -- expected, see `mouse_delta`. `re_anchored` marks
+            // the one event per warp measured from the warp's landing
+            // point; `raw_dx`/`raw_dy` show the contaminated delta fields
+            // it replaced.
             tracing::debug!(
                 stage = "1-capture",
                 loc_x = location.x,
                 loc_y = location.y,
                 dx,
                 dy,
+                raw_dx = raw.0,
+                raw_dy = raw.1,
+                re_anchored = anchor.is_some(),
                 "macOS capture: mouse motion"
             );
             Some(InputMessage::MouseMove { dx, dy })
@@ -190,10 +207,40 @@ pub fn to_input_message(
 /// screen-point deltas with macOS's pointer-acceleration curve applied
 /// — *not* raw pre-acceleration HID counts, as an earlier revision of
 /// this file asserted without measuring.
+///
+/// **One exception, also measured: the first real event after one of
+/// this process's own warps.** macOS computes these fields against the
+/// pointer's last *hardware* position, not against where a programmatic
+/// warp just put it — so the first real motion event after
+/// `Effect::RecenterLocal`'s warp carries the whole warp displacement as
+/// if the hand had made it. Real Mac->Windows acceptance run
+/// (2026-09-12): the pointer at x=1469.98 crossed the right edge, the
+/// recentre warped it to (735, 478), and the next real event, at
+/// x=740.08, reported `kCGMouseEventDeltaX = -729` — exactly
+/// `740.08 - 1469.98`, the warp plus ~5 points of genuine motion. On the
+/// remote screen that is an instant ~730-point jump left from x=5,
+/// straight back across the edge home: all 20 switches in that run
+/// bounced back within ~8ms. [`to_input_message`] therefore measures
+/// that single event from the warp's landing point instead (see
+/// [`anchored_delta`]); every other event uses these fields.
 fn mouse_delta(event: &CGEvent) -> (i32, i32) {
     (
         event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X) as i32,
         event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y) as i32,
+    )
+}
+
+/// The delta from `anchor` — where this process's own most recent warp
+/// landed — to `current`, rounded to whole points. Used for exactly one
+/// event per warp (see [`mouse_delta`]'s exception). The display clamp
+/// that rules out diffing locations in general doesn't reach this one
+/// event: the only warp the capturing device issues (`RecenterLocal`)
+/// lands at the centre of the screen, and this is the very next event,
+/// a few points from it.
+fn anchored_delta(anchor: CGPoint, current: CGPoint) -> (i32, i32) {
+    (
+        (current.x - anchor.x).round() as i32,
+        (current.y - anchor.y).round() as i32,
     )
 }
 
@@ -257,14 +304,13 @@ fn modifier_transition(
 mod tests {
     use core_graphics::event::CGMouseButton;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-    use core_graphics::geometry::CGPoint;
 
     use super::*;
 
     /// Constructs a real (unposted -- never actually injected, no
     /// Accessibility permission needed) `MouseMoved` `CGEvent`, so
     /// [`to_input_message`]'s marker-filtering can be exercised for
-    /// real instead of only through the pure [`point_delta`] helper.
+    /// real instead of only through the pure [`anchored_delta`] helper.
     fn mouse_moved_event(x: f64, y: f64, synthetic: bool) -> CGEvent {
         mouse_moved_event_with_delta(x, y, 0, 0, synthetic)
     }
@@ -313,38 +359,113 @@ mod tests {
     #[test]
     fn a_synthetic_self_posted_warp_event_produces_no_input_message() {
         let mut last_flags = CGEventFlags::empty();
+        let mut anchor = None;
         let event = mouse_moved_event(500.0, 400.0, true);
-        let message = to_input_message(CGEventType::MouseMoved, &event, &mut last_flags);
+        let message = to_input_message(
+            CGEventType::MouseMoved,
+            &event,
+            &mut last_flags,
+            &mut anchor,
+        );
         assert_eq!(message, None);
     }
 
-    /// A warp this process posts is filtered by its marker, and — unlike
-    /// the previous absolute-position-diffing implementation — cannot
-    /// affect how the *next* real event is interpreted either, because
-    /// each event now carries its own motion. This is what removed the
-    /// need for any cross-event position state at all.
+    /// **Regression test for the Phase 4 acceptance-run bounce** (ADR-0009
+    /// decision 18), built verbatim from the real hardware log.
+    ///
+    /// Every one of 20 Mac->Windows switches bounced straight back home
+    /// within ~8ms. The first real event after `RecenterLocal`'s warp
+    /// reported `kCGMouseEventDeltaX = -729`: macOS computes the delta
+    /// fields against the last *hardware* position (the right edge,
+    /// x=1469.98), so the warp's own ~734-point jump to the centre was
+    /// folded into an unmarked, genuinely-hardware event that the
+    /// synthetic-event marker cannot catch. The remote cursor went from
+    /// x=5 to x=-724 -- across the left edge, home.
     #[test]
-    fn a_synthetic_warp_does_not_disturb_the_next_real_events_delta() {
-        let mut last_flags = CGEventFlags::empty();
-        let warp = mouse_moved_event_with_delta(1200.0, 900.0, 0, 0, true);
+    fn the_first_real_event_after_our_own_warp_is_measured_from_where_the_warp_landed() {
+        let (mut last_flags, mut anchor) = (CGEventFlags::empty(), None);
+
+        // Last real event before the switch: pointer at the right edge.
+        let at_edge = mouse_moved_event_with_delta(1469.98046875, 486.6796875, 6, 1, false);
         assert_eq!(
-            to_input_message(CGEventType::MouseMoved, &warp, &mut last_flags),
+            to_input_message(
+                CGEventType::MouseMoved,
+                &at_edge,
+                &mut last_flags,
+                &mut anchor
+            ),
+            Some(InputMessage::MouseMove { dx: 6, dy: 1 })
+        );
+
+        // RecenterLocal's own warp to the screen centre: filtered.
+        let warp = mouse_moved_event_with_delta(735.0, 478.0, 0, 0, true);
+        assert_eq!(
+            to_input_message(CGEventType::MouseMoved, &warp, &mut last_flags, &mut anchor),
             None
         );
-        // A real event right after the warp, from a completely
-        // different location, still reports exactly its own motion.
-        let real = mouse_moved_event_with_delta(300.0, 200.0, 7, -4, false);
+
+        // The next real event, verbatim: its delta fields carry the
+        // warp's whole displacement (-729, -7). The hand actually moved
+        // the ~5 points from where the warp landed.
+        let first_after_warp =
+            mouse_moved_event_with_delta(740.08203125, 478.5078125, -729, -7, false);
         assert_eq!(
-            to_input_message(CGEventType::MouseMoved, &real, &mut last_flags),
-            Some(InputMessage::MouseMove { dx: 7, dy: -4 })
+            to_input_message(
+                CGEventType::MouseMoved,
+                &first_after_warp,
+                &mut last_flags,
+                &mut anchor
+            ),
+            Some(InputMessage::MouseMove { dx: 5, dy: 1 }),
+            "the first real event after our own warp must be measured from where the warp \
+             landed -- its delta fields include the warp itself, which bounced every Phase 4 \
+             switch straight back home"
+        );
+
+        // The event after that is clean again, and must come from its
+        // own delta fields (5, 0) -- diffing locations would give (6, 1)
+        // here -- proving the anchor is used for exactly one event.
+        let next = mouse_moved_event_with_delta(745.98046875, 479.578125, 5, 0, false);
+        assert_eq!(
+            to_input_message(CGEventType::MouseMoved, &next, &mut last_flags, &mut anchor),
+            Some(InputMessage::MouseMove { dx: 5, dy: 0 })
+        );
+    }
+
+    /// The second bounce from the same run: the warp's *vertical*
+    /// displacement (523.41 -> 478.0, reported as `dy = -45`) is
+    /// contamination too, not just the horizontal one.
+    #[test]
+    fn warp_contamination_is_removed_from_both_axes() {
+        let (mut last_flags, mut anchor) = (CGEventFlags::empty(), None);
+        let warp = mouse_moved_event_with_delta(735.0, 478.0, 0, 0, true);
+        assert_eq!(
+            to_input_message(CGEventType::MouseMoved, &warp, &mut last_flags, &mut anchor),
+            None
+        );
+        let first_after_warp = mouse_moved_event_with_delta(752.15625, 478.0, -695, -45, false);
+        assert_eq!(
+            to_input_message(
+                CGEventType::MouseMoved,
+                &first_after_warp,
+                &mut last_flags,
+                &mut anchor
+            ),
+            Some(InputMessage::MouseMove { dx: 17, dy: 0 })
         );
     }
 
     #[test]
     fn a_real_unmarked_event_still_produces_a_move() {
         let mut last_flags = CGEventFlags::empty();
+        let mut anchor = None;
         let event = mouse_moved_event_with_delta(500.0, 400.0, 10, 0, false);
-        let message = to_input_message(CGEventType::MouseMoved, &event, &mut last_flags);
+        let message = to_input_message(
+            CGEventType::MouseMoved,
+            &event,
+            &mut last_flags,
+            &mut anchor,
+        );
         assert_eq!(message, Some(InputMessage::MouseMove { dx: 10, dy: 0 }));
     }
 
@@ -368,6 +489,7 @@ mod tests {
     #[test]
     fn motion_is_still_reported_when_the_pointer_is_clamped_at_the_screen_edge() {
         let mut last_flags = CGEventFlags::empty();
+        let mut anchor = None;
         // Verbatim from the real hardware capture (samples 86-89): the
         // location is pinned at the display's boundary and never
         // changes, while the mouse reports substantial continued motion.
@@ -375,7 +497,12 @@ mod tests {
         for hid_dx in clamped_at_right_edge {
             let event = mouse_moved_event_with_delta(1470.0, 411.4, hid_dx, 0, false);
             assert_eq!(
-                to_input_message(CGEventType::MouseMoved, &event, &mut last_flags),
+                to_input_message(
+                    CGEventType::MouseMoved,
+                    &event,
+                    &mut last_flags,
+                    &mut anchor
+                ),
                 Some(InputMessage::MouseMove {
                     dx: hid_dx as i32,
                     dy: 0
@@ -391,7 +518,12 @@ mod tests {
         for hid_dy in [2, 5, 3, -8, -12] {
             let event = mouse_moved_event_with_delta(1470.0, 956.0, 0, hid_dy, false);
             assert_eq!(
-                to_input_message(CGEventType::MouseMoved, &event, &mut last_flags),
+                to_input_message(
+                    CGEventType::MouseMoved,
+                    &event,
+                    &mut last_flags,
+                    &mut anchor
+                ),
                 Some(InputMessage::MouseMove {
                     dx: 0,
                     dy: hid_dy as i32
@@ -405,9 +537,15 @@ mod tests {
     #[test]
     fn a_stationary_pointer_reports_no_motion() {
         let mut last_flags = CGEventFlags::empty();
+        let mut anchor = None;
         let event = mouse_moved_event_with_delta(1470.0, 411.4, 0, 0, false);
         assert_eq!(
-            to_input_message(CGEventType::MouseMoved, &event, &mut last_flags),
+            to_input_message(
+                CGEventType::MouseMoved,
+                &event,
+                &mut last_flags,
+                &mut anchor
+            ),
             Some(InputMessage::MouseMove { dx: 0, dy: 0 })
         );
     }
@@ -417,6 +555,7 @@ mod tests {
     #[test]
     fn drag_events_report_motion_too() {
         let mut last_flags = CGEventFlags::empty();
+        let mut anchor = None;
         for event_type in [
             CGEventType::LeftMouseDragged,
             CGEventType::RightMouseDragged,
@@ -424,7 +563,7 @@ mod tests {
         ] {
             let event = mouse_moved_event_with_delta(1470.0, 400.0, 33, -16, false);
             assert_eq!(
-                to_input_message(event_type, &event, &mut last_flags),
+                to_input_message(event_type, &event, &mut last_flags, &mut anchor),
                 Some(InputMessage::MouseMove { dx: 33, dy: -16 }),
                 "{event_type:?} must report motion identically to a plain move"
             );

@@ -128,11 +128,15 @@ impl Capture for MacCapture {
                 // into this one. A `Cell` rather than a plain local:
                 // `CGEventTap::new` requires an `Fn` callback, not
                 // `FnMut`, so the closure only ever touches this through
-                // a shared reference. Mouse motion needs no equivalent
-                // per-session state — see `events::mouse_delta` and
-                // ADR-0009 decision 17 for why carrying a previous
-                // cursor reading here was the Phase 4 pointer-range bug.
+                // a shared reference.
                 let last_flags = Cell::new(CGEventFlags::empty());
+                // Where this process's own most recent cursor warp
+                // landed, held for exactly one following real event --
+                // see `events::to_input_message` and ADR-0009 decision
+                // 18. Fresh per session for the same reason as
+                // `last_flags`.
+                let post_warp_anchor: Cell<Option<core_graphics::geometry::CGPoint>> =
+                    Cell::new(None);
                 // `None` until the first mouse-motion event applies an
                 // initial association state; used only to decide whether
                 // a change is worth a log line (see decision 14) -- the
@@ -179,8 +183,10 @@ impl Capture for MacCapture {
                             return CallbackResult::Keep;
                         }
                         let mut flags = last_flags.get();
-                        let message = to_input_message(event_type, event, &mut flags);
+                        let mut anchor = post_warp_anchor.get();
+                        let message = to_input_message(event_type, event, &mut flags, &mut anchor);
                         last_flags.set(flags);
+                        post_warp_anchor.set(anchor);
                         if let Some(message) = message {
                             // A full channel or a dropped receiver just
                             // means "no one is listening anymore" — not a

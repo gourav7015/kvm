@@ -974,3 +974,74 @@ genuinely stationary pointer (the fix must not manufacture motion), and
 a synthetic warp not disturbing the next real event's delta.
 
 **Open**: real Mac->Windows hardware acceptance of the full round trip.
+
+### 18. Acceptance run found a regression in decision 17: the first real event after our own warp carries the warp in its delta fields
+
+**Update (2026-09-12):** the first real Mac->Windows acceptance run
+against decision 17 failed — differently from every earlier failure.
+Every one of 20 switches to Windows bounced straight back to the Mac
+within ~8ms; the hub log contains zero forwarded moves
+(`stage="3-session-send"`), and the Windows log only ever shows handoff
+warps to x=5.
+
+**Measured cause.** In each bounce, the first real hardware event after
+`RecenterLocal`'s warp carried the warp's own displacement in its
+`kCGMouseEventDeltaX/Y` fields. First bounce, verbatim:
+
+```
+last real event   loc_x=1469.98 loc_y=486.68   dx=6     dy=1
+RecenterLocal     warp to (735, 478)  -- marked, filtered as designed
+next real event   loc_x=740.08  loc_y=478.51   dx=-729  dy=-7
+```
+
+`740.08 - 1469.98 = -729.9` → `-729`. Second bounce: `752.16 - 1447.92 =
+-695.8` → `-695`, and `478.0 - 523.41 = -45.4` → `-45` on the vertical
+axis. 19 of the 20 bounces show a post-warp event with `|dx| > 650`;
+the twentieth (`-114`, within ~2 points of its own pre-warp
+displacement) came 16ms after a previous bounce and follows the same
+pattern. The macOS delta fields are computed against the pointer's last
+*hardware* position, not against where a programmatic warp just put it.
+The router then did exactly what it should with the input it was given:
+5 - 729 = -724, across the left edge, home.
+
+**This is a regression decision 17 introduced**, and its "cross-event
+position state is gone entirely" paragraph is superseded here. The old
+location-diffing code re-anchored its baseline on the marked warp event,
+which is precisely what protected the next real event from this —
+decision 17 removed that as "nothing to re-anchor". The same signature
+was visible in the probe data that confirmed decision 17 and was missed:
+probe sample 1, immediately after the probe's own recentre, reads
+`loc 735.0,478.0 hid_dx=270 hid_dy=-367`.
+
+**Fix: restore exactly the one piece of re-anchoring that was
+load-bearing, for exactly one event.** When `to_input_message` sees our
+own marked warp event it records where it landed (`post_warp_anchor`);
+the next real motion event is measured as its location minus that
+anchor (`anchored_delta`), and the anchor is cleared. Every other event
+keeps using the delta fields, so decision 17's pointer-range fix is
+untouched. The display clamp that rules out location-diffing in general
+cannot reach this one event: the only warp the capturing device issues
+lands at the centre of its screen, and this is the very next event, a
+few points away.
+
+Capture layer only (`events.rs`, `capture.rs`) — `router.rs`,
+`ownership.rs`, `session.rs`, the protocol and the transport are
+untouched. `RecenterLocal` and the synthetic-event marker are unchanged
+in behaviour; no constants, sleeps, scaling or new warps are added.
+
+**Regression tests**, verbatim from the hardware log:
+`the_first_real_event_after_our_own_warp_is_measured_from_where_the_warp_landed`
+feeds the real pre-switch event, the marked warp, the contaminated
+`(-729, -7)` event and the clean event after it, asserting `(5, 1)` for
+the contaminated one and `(5, 0)` — from the delta fields, not the
+location diff, which would give `(6, 1)` — for the next, so the anchor
+is proven to apply to exactly one event.
+`warp_contamination_is_removed_from_both_axes` covers the second
+bounce's vertical contamination. The decision-17 test that asserted a
+warp "cannot affect how the next real event is interpreted" encoded the
+very assumption the hardware disproved, and is replaced.
+
+The stage-1 trace now also logs `raw_dx`/`raw_dy` and `re_anchored`, so
+the retest shows each correction directly.
+
+**Open**: real Mac->Windows hardware acceptance of the full round trip.

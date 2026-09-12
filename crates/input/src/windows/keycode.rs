@@ -4,12 +4,16 @@
 
 use kvm_protocol::Key;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_A, VK_B, VK_BACK,
-    VK_C, VK_CAPITAL, VK_D, VK_DELETE, VK_DOWN, VK_E, VK_END, VK_ESCAPE, VK_F, VK_F1, VK_F2, VK_F3,
-    VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_G, VK_H, VK_HOME, VK_I,
-    VK_J, VK_K, VK_L, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_M, VK_N, VK_NEXT,
-    VK_O, VK_P, VK_PRIOR, VK_Q, VK_R, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT,
-    VK_RWIN, VK_S, VK_SPACE, VK_T, VK_TAB, VK_U, VK_UP, VK_V, VK_W, VK_X, VK_Y, VK_Z,
+    VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_A, VK_ADD, VK_B,
+    VK_BACK, VK_C, VK_CAPITAL, VK_D, VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_E, VK_END,
+    VK_ESCAPE, VK_F, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11,
+    VK_F12, VK_G, VK_H, VK_HOME, VK_I, VK_J, VK_K, VK_L, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT,
+    VK_LWIN, VK_M, VK_MULTIPLY, VK_N, VK_NEXT, VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3,
+    VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, VK_O, VK_OEM_1,
+    VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS,
+    VK_OEM_PERIOD, VK_OEM_PLUS, VK_P, VK_PRIOR, VK_Q, VK_R, VK_RCONTROL, VK_RETURN, VK_RIGHT,
+    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_S, VK_SPACE, VK_SUBTRACT, VK_T, VK_TAB, VK_U, VK_UP, VK_V,
+    VK_W, VK_X, VK_Y, VK_Z,
 };
 
 /// Translates a raw Windows virtual-key code into a normalized [`Key`].
@@ -94,6 +98,38 @@ pub fn vk_to_key(vk: VIRTUAL_KEY) -> Key {
         VK_TAB => Key::Tab,
         VK_SPACE => Key::Space,
 
+        // The `VK_OEM_*` codes name US-layout key *positions*, matching
+        // `Key`'s own positional meaning; Windows applies the active layout.
+        VK_OEM_MINUS => Key::Minus,
+        VK_OEM_PLUS => Key::Equal,
+        VK_OEM_4 => Key::BracketLeft,
+        VK_OEM_6 => Key::BracketRight,
+        VK_OEM_5 => Key::Backslash,
+        VK_OEM_1 => Key::Semicolon,
+        VK_OEM_7 => Key::Quote,
+        VK_OEM_3 => Key::Backquote,
+        VK_OEM_COMMA => Key::Comma,
+        VK_OEM_PERIOD => Key::Period,
+        VK_OEM_2 => Key::Slash,
+
+        VK_NUMPAD0 => Key::Numpad0,
+        VK_NUMPAD1 => Key::Numpad1,
+        VK_NUMPAD2 => Key::Numpad2,
+        VK_NUMPAD3 => Key::Numpad3,
+        VK_NUMPAD4 => Key::Numpad4,
+        VK_NUMPAD5 => Key::Numpad5,
+        VK_NUMPAD6 => Key::Numpad6,
+        VK_NUMPAD7 => Key::Numpad7,
+        VK_NUMPAD8 => Key::Numpad8,
+        VK_NUMPAD9 => Key::Numpad9,
+        VK_DECIMAL => Key::NumpadDecimal,
+        VK_MULTIPLY => Key::NumpadMultiply,
+        VK_ADD => Key::NumpadAdd,
+        VK_SUBTRACT => Key::NumpadSubtract,
+        VK_DIVIDE => Key::NumpadDivide,
+        // No arm for `Key::NumpadEnter`: Windows has no distinct VK for it
+        // (it's `VK_RETURN` plus the extended-key flag), so a captured
+        // numpad Enter reads back as `Key::Enter` here.
         other => Key::Unknown(other.0 as u32),
     }
 }
@@ -181,6 +217,36 @@ pub fn key_to_vk(key: Key) -> Option<VIRTUAL_KEY> {
         Key::Tab => VK_TAB,
         Key::Space => VK_SPACE,
 
+        Key::Minus => VK_OEM_MINUS,
+        Key::Equal => VK_OEM_PLUS,
+        Key::BracketLeft => VK_OEM_4,
+        Key::BracketRight => VK_OEM_6,
+        Key::Backslash => VK_OEM_5,
+        Key::Semicolon => VK_OEM_1,
+        Key::Quote => VK_OEM_7,
+        Key::Backquote => VK_OEM_3,
+        Key::Comma => VK_OEM_COMMA,
+        Key::Period => VK_OEM_PERIOD,
+        Key::Slash => VK_OEM_2,
+
+        Key::Numpad0 => VK_NUMPAD0,
+        Key::Numpad1 => VK_NUMPAD1,
+        Key::Numpad2 => VK_NUMPAD2,
+        Key::Numpad3 => VK_NUMPAD3,
+        Key::Numpad4 => VK_NUMPAD4,
+        Key::Numpad5 => VK_NUMPAD5,
+        Key::Numpad6 => VK_NUMPAD6,
+        Key::Numpad7 => VK_NUMPAD7,
+        Key::Numpad8 => VK_NUMPAD8,
+        Key::Numpad9 => VK_NUMPAD9,
+        Key::NumpadDecimal => VK_DECIMAL,
+        Key::NumpadMultiply => VK_MULTIPLY,
+        Key::NumpadAdd => VK_ADD,
+        Key::NumpadSubtract => VK_SUBTRACT,
+        Key::NumpadDivide => VK_DIVIDE,
+        // See `vk_to_key`: injected as a plain Return, which types Enter.
+        Key::NumpadEnter => VK_RETURN,
+
         Key::Unknown(code) if code <= u16::MAX as u32 => VIRTUAL_KEY(code as u16),
         Key::Unknown(_) => return None,
     })
@@ -263,7 +329,55 @@ mod tests {
         Key::Delete,
         Key::Tab,
         Key::Space,
+        Key::Minus,
+        Key::Equal,
+        Key::BracketLeft,
+        Key::BracketRight,
+        Key::Backslash,
+        Key::Semicolon,
+        Key::Quote,
+        Key::Backquote,
+        Key::Comma,
+        Key::Period,
+        Key::Slash,
+        Key::Numpad0,
+        Key::Numpad1,
+        Key::Numpad2,
+        Key::Numpad3,
+        Key::Numpad4,
+        Key::Numpad5,
+        Key::Numpad6,
+        Key::Numpad7,
+        Key::Numpad8,
+        Key::Numpad9,
+        Key::NumpadDecimal,
+        Key::NumpadMultiply,
+        Key::NumpadAdd,
+        Key::NumpadSubtract,
+        Key::NumpadDivide,
+        // `Key::NumpadEnter` deliberately excluded: it injects as
+        // `VK_RETURN`, which reads back as `Key::Enter` — see
+        // `numpad_enter_injects_as_return`.
     ];
+
+    #[test]
+    fn numpad_enter_injects_as_return() {
+        assert_eq!(key_to_vk(Key::NumpadEnter), Some(VK_RETURN));
+    }
+
+    /// The Windows half of the Phase 4 acceptance-run keyboard regression
+    /// (ADR-0007's 2026-09-12 update): each key must inject its own named
+    /// VK, not the VK that happens to share the Mac's raw keycode number.
+    #[test]
+    fn keys_from_the_acceptance_log_inject_their_own_vk_not_the_mac_numbers() {
+        assert_eq!(key_to_vk(Key::Backquote), Some(VK_OEM_3)); // was VK 0x32, the digit 2
+        assert_eq!(key_to_vk(Key::NumpadEnter), Some(VK_RETURN)); // was VK 0x4C, L
+        assert_eq!(key_to_vk(Key::Numpad9), Some(VK_NUMPAD9)); // was VK 0x5C, the Windows key
+        assert_ne!(key_to_vk(Key::Numpad9), Some(VK_RWIN));
+        assert_eq!(key_to_vk(Key::BracketLeft), Some(VK_OEM_4)); // was VK 0x21, Page Up
+        assert_eq!(key_to_vk(Key::Minus), Some(VK_OEM_MINUS)); // was VK 0x1B, Escape
+        assert_eq!(key_to_vk(Key::Numpad0), Some(VK_NUMPAD0)); // was VK 0x52, R
+    }
 
     #[test]
     fn every_mapped_key_round_trips_through_the_windows_code() {

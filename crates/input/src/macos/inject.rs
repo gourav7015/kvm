@@ -4,12 +4,13 @@ use core_graphics::display::CGDisplay;
 use core_graphics::event::{CGEvent, CGEventTapLocation, CGMouseButton, ScrollEventUnit};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
-use kvm_protocol::{ButtonState, InputMessage, MouseButton};
+use kvm_protocol::{ButtonState, InputMessage, MouseButton, PlatformKind};
 
 use crate::error::InputError;
 use crate::macos::keycode::key_to_keycode;
 use crate::macos::permission::has_accessibility_permission;
 use crate::traits::{Inject, PointerGeometry};
+use crate::translate::is_injectable;
 
 #[derive(Default)]
 pub struct MacInject;
@@ -36,7 +37,19 @@ impl Inject for MacInject {
         }
 
         match *event {
-            InputMessage::Key { key, state, .. } => {
+            InputMessage::Key {
+                key,
+                state,
+                source_os,
+                ..
+            } => {
+                // A raw code from another platform is that platform's
+                // number, not a macOS keycode -- see `translate::is_injectable`.
+                if !is_injectable(key, source_os, PlatformKind::MacOs) {
+                    return Err(InputError::Unsupported(format!(
+                        "{key:?} is a raw {source_os:?} key code with no meaning on macOS -- not injected"
+                    )));
+                }
                 let Some(code) = key_to_keycode(key) else {
                     return Err(InputError::Unsupported(format!(
                         "{key:?} has no macOS keycode to inject"

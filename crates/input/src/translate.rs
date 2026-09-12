@@ -49,6 +49,25 @@ pub fn translate_for_target(key: Key, source: PlatformKind, target: PlatformKind
     }
 }
 
+/// Whether `key`, captured on `source`, means anything when injected on
+/// `target`. Every named [`Key`] does. A [`Key::Unknown`] does not travel:
+/// it carries a raw code from `source`'s own key-code space, and injected
+/// on any other platform that number is simply reinterpreted as whatever
+/// *that* platform assigns to it.
+///
+/// **Found via the Phase 4 real-hardware acceptance run** (ADR-0007's
+/// 2026-09-12 update): with punctuation and numpad keys not yet named, a
+/// Mac keypad 9 left as `Unknown(0x5C)` and Windows pressed `VK_RWIN` —
+/// the Windows key — while Mac keypad 0 typed `R`, `[` pressed Page Up
+/// and `-` pressed Escape. Naming those keys fixed them; this rule is what
+/// stops the *next* unnamed key from doing the same, however many more
+/// keys get named later. A same-platform `Unknown` still round-trips
+/// exactly, preserving decision 1's "never silently dropped" guarantee
+/// where the code actually means something.
+pub(crate) fn is_injectable(key: Key, source: PlatformKind, target: PlatformKind) -> bool {
+    !matches!(key, Key::Unknown(_)) || source == target
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +253,57 @@ mod tests {
                 translate_for_target(Key::Unknown(12345), source, target),
                 Key::Unknown(12345)
             );
+        }
+    }
+
+    /// Regression test for the Phase 4 acceptance-run keyboard failure
+    /// (ADR-0007's 2026-09-12 update), with the raw Mac codes from the
+    /// real hub log. Each was injected on Windows as the key that happens
+    /// to share its number; none may be injected on another platform.
+    #[test]
+    fn a_foreign_raw_key_code_from_the_acceptance_log_is_never_injectable() {
+        for code in [
+            0x5C, // Mac keypad 9 -> Windows pressed the Windows key (VK_RWIN)
+            0x21, // Mac [        -> Windows pressed Page Up
+            0x1B, // Mac -        -> Windows pressed Escape
+            0x2C, // Mac /        -> Windows pressed Print Screen
+            0x32, // Mac `        -> Windows typed 2
+            0x4C, // Mac keypad Enter -> Windows typed L
+            0x47, // Mac keypad Clear -> Windows typed G (still unnamed today)
+        ] {
+            for target in [PlatformKind::Windows, PlatformKind::Linux] {
+                assert!(
+                    !is_injectable(Key::Unknown(code), PlatformKind::MacOs, target),
+                    "raw macOS code {code:#x} must never be injected on {target:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_raw_key_code_is_still_injectable_on_its_own_platform() {
+        for platform in PLATFORMS {
+            assert!(is_injectable(Key::Unknown(42), platform, platform));
+        }
+    }
+
+    #[test]
+    fn every_named_key_is_injectable_across_platforms() {
+        for (source, target) in all_cross_platform_pairs() {
+            for key in [
+                Key::A,
+                Key::Enter,
+                Key::MetaLeft,
+                Key::Backquote,
+                Key::BracketLeft,
+                Key::Numpad9,
+                Key::NumpadEnter,
+            ] {
+                assert!(
+                    is_injectable(key, source, target),
+                    "{key:?} {source:?}->{target:?}"
+                );
+            }
         }
     }
 

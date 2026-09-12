@@ -62,6 +62,35 @@ pub fn keysym_to_key(keysym: u32) -> Key {
         0xff09 => Key::Tab,
         0x0020 => Key::Space,
 
+        0x002d => Key::Minus,        // XK_minus
+        0x003d => Key::Equal,        // XK_equal
+        0x005b => Key::BracketLeft,  // XK_bracketleft
+        0x005d => Key::BracketRight, // XK_bracketright
+        0x005c => Key::Backslash,    // XK_backslash
+        0x003b => Key::Semicolon,    // XK_semicolon
+        0x0027 => Key::Quote,        // XK_apostrophe
+        0x0060 => Key::Backquote,    // XK_grave
+        0x002c => Key::Comma,        // XK_comma
+        0x002e => Key::Period,       // XK_period
+        0x002f => Key::Slash,        // XK_slash
+
+        0xffb0 => Key::Numpad0, // XK_KP_0
+        0xffb1 => Key::Numpad1,
+        0xffb2 => Key::Numpad2,
+        0xffb3 => Key::Numpad3,
+        0xffb4 => Key::Numpad4,
+        0xffb5 => Key::Numpad5,
+        0xffb6 => Key::Numpad6,
+        0xffb7 => Key::Numpad7,
+        0xffb8 => Key::Numpad8,
+        0xffb9 => Key::Numpad9,        // XK_KP_9
+        0xffae => Key::NumpadDecimal,  // XK_KP_Decimal
+        0xffaa => Key::NumpadMultiply, // XK_KP_Multiply
+        0xffab => Key::NumpadAdd,      // XK_KP_Add
+        0xffad => Key::NumpadSubtract, // XK_KP_Subtract
+        0xffaf => Key::NumpadDivide,   // XK_KP_Divide
+        0xff8d => Key::NumpadEnter,    // XK_KP_Enter
+
         other => Key::Unknown(other),
     }
 }
@@ -149,6 +178,35 @@ pub fn key_to_keysym(key: Key) -> u32 {
         Key::Delete => 0xffff,
         Key::Tab => 0xff09,
         Key::Space => 0x0020,
+
+        Key::Minus => 0x002d,
+        Key::Equal => 0x003d,
+        Key::BracketLeft => 0x005b,
+        Key::BracketRight => 0x005d,
+        Key::Backslash => 0x005c,
+        Key::Semicolon => 0x003b,
+        Key::Quote => 0x0027,
+        Key::Backquote => 0x0060,
+        Key::Comma => 0x002c,
+        Key::Period => 0x002e,
+        Key::Slash => 0x002f,
+
+        Key::Numpad0 => 0xffb0,
+        Key::Numpad1 => 0xffb1,
+        Key::Numpad2 => 0xffb2,
+        Key::Numpad3 => 0xffb3,
+        Key::Numpad4 => 0xffb4,
+        Key::Numpad5 => 0xffb5,
+        Key::Numpad6 => 0xffb6,
+        Key::Numpad7 => 0xffb7,
+        Key::Numpad8 => 0xffb8,
+        Key::Numpad9 => 0xffb9,
+        Key::NumpadDecimal => 0xffae,
+        Key::NumpadMultiply => 0xffaa,
+        Key::NumpadAdd => 0xffab,
+        Key::NumpadSubtract => 0xffad,
+        Key::NumpadDivide => 0xffaf,
+        Key::NumpadEnter => 0xff8d,
 
         Key::Unknown(code) => code,
     }
@@ -279,6 +337,33 @@ mod tests {
         Key::Delete,
         Key::Tab,
         Key::Space,
+        Key::Minus,
+        Key::Equal,
+        Key::BracketLeft,
+        Key::BracketRight,
+        Key::Backslash,
+        Key::Semicolon,
+        Key::Quote,
+        Key::Backquote,
+        Key::Comma,
+        Key::Period,
+        Key::Slash,
+        Key::Numpad0,
+        Key::Numpad1,
+        Key::Numpad2,
+        Key::Numpad3,
+        Key::Numpad4,
+        Key::Numpad5,
+        Key::Numpad6,
+        Key::Numpad7,
+        Key::Numpad8,
+        Key::Numpad9,
+        Key::NumpadDecimal,
+        Key::NumpadMultiply,
+        Key::NumpadAdd,
+        Key::NumpadSubtract,
+        Key::NumpadDivide,
+        Key::NumpadEnter,
     ];
 
     #[test]

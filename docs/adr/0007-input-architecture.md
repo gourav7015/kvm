@@ -60,6 +60,62 @@ then A down" from that ordered stream exactly as it would from two
 fingers on a real keyboard — the same mechanism that already made
 mouse-drag-while-a-key-is-held work without any special-casing.
 
+**Update (2026-09-12, Phase 4 real Mac->Windows acceptance run):**
+punctuation and numpad keys were broken on the receiving side, and two
+separate defects combined to cause it — both measured from the hub
+log's `stage="3-session-send"` lines, which record the exact `Key` sent
+for every press.
+
+*`Key` had no variants for punctuation or numpad keys at all*, so every
+one of them left the Mac as `Key::Unknown(<raw macOS keycode>)`.
+
+*Every injector then injected a foreign `Unknown` code as if it were
+its own.* `key_to_vk`'s `Key::Unknown(code) => VIRTUAL_KEY(code)`
+reinterprets a macOS keycode as a Windows VK — two unrelated numbering
+schemes. From the log: `` ` `` (`Unknown(50)`, pressed 14 times) typed
+the digit `2` (VK 0x32); keypad Enter (`Unknown(76)`, 32 times) typed
+`L`; keypad 0–7 typed `R`–`Y`; `[` pressed Page Up; `-` pressed Escape;
+`'` pressed Right arrow; `/` pressed Print Screen; and **keypad 9
+(`Unknown(92)` = VK 0x5C) pressed the Windows key**. Comma, period,
+semicolon, `]`, `=` and `\` landed on unassigned VKs and did nothing.
+`key_to_keycode` and `key_to_keysym` had the identical flaw in the
+other directions. Decision 1 above already said raw codes weren't
+portable; nothing enforced it.
+
+**Fix, two parts.** `Key` gains 27 variants — the 11 US-layout
+punctuation positions and 16 numpad keys (protocol 1.1, `PROTOCOL_MINOR`
+bumped). They are **appended after `Unknown`**: postcard encodes an enum
+variant as its declaration index, so inserting them earlier would have
+silently renumbered `Unknown` on the wire; `key_wire_indices_are_stable`
+now pins those indices. All three tables map them (macOS `kVK_*`,
+Windows `VK_OEM_*`/`VK_NUMPAD*`, X11 `XK_*`). And a new pure rule,
+`translate::is_injectable`, refuses to inject a `Key::Unknown` on any
+platform other than the message's `source_os`; each injector checks it
+and returns `InputError::Unsupported` instead of guessing. The decision
+itself lives in the OS-independent `translate` module, consistent with
+the first update above — the per-OS shims only enforce it. A
+same-platform `Unknown` still round-trips exactly, so decision 1's
+"never silently dropped" property holds wherever the code actually
+means something.
+
+This amends decision 1: a raw code is preserved on the wire as before,
+but is only ever injected on the platform that produced it.
+
+Known, documented limits of this change: keys that remain unnamed
+(macOS keypad Clear and keypad `=`, the ISO `§` key, F13+, media keys)
+are now refused cross-platform — logged, not typed as some unrelated
+key. Windows has no distinct VK for numpad Enter (it is `VK_RETURN`
+plus the extended-key flag), so it injects as a plain Return and a
+Windows-captured numpad Enter reads back as `Key::Enter`. X11 keypad
+injection depends on the running server's keymap exposing the `KP_*`
+keysyms and is not yet hardware-verified. Regression tests use the
+codes from the real log verbatim, at the capture table
+(`punctuation_and_numpad_codes_from_the_acceptance_log_are_named_not_unknown`),
+the Windows table
+(`keys_from_the_acceptance_log_inject_their_own_vk_not_the_mac_numbers`),
+and the portability rule
+(`a_foreign_raw_key_code_from_the_acceptance_log_is_never_injectable`).
+
 ## Context
 
 Phase 3 needed a platform-independent input representation plus per-OS

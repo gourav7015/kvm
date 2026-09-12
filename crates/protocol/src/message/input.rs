@@ -123,8 +123,51 @@ pub enum Key {
 
     /// A key this device's `input` crate doesn't yet map to a normalized
     /// variant, carrying its raw platform code so it isn't lost — see the
-    /// module docs.
+    /// module docs. The code is only meaningful on the platform that
+    /// produced it (the message's `source_os`); injectors refuse a foreign
+    /// one rather than reinterpreting it — see ADR-0007's 2026-09-12 update.
     Unknown(u32),
+
+    // ---- Added in protocol 1.1 --------------------------------------
+    //
+    // Appended *after* `Unknown` deliberately: postcard encodes an enum
+    // variant as its declaration index, so inserting these anywhere
+    // earlier would silently renumber `Unknown` (and every key declared
+    // after the insertion point) on the wire. `key_wire_indices_are_stable`
+    // pins this. Names follow the same W3C `KeyboardEvent.code` scheme as
+    // the rest of this enum (`Digit0`, `ArrowUp`, `ShiftLeft`): each names
+    // a physical key *position* on a US layout, not the character it types
+    // — the receiving OS applies its own keyboard layout, exactly as it
+    // already does for letters.
+    Minus,
+    Equal,
+    BracketLeft,
+    BracketRight,
+    Backslash,
+    Semicolon,
+    Quote,
+    /// The `` ` ``/`~` key.
+    Backquote,
+    Comma,
+    Period,
+    Slash,
+
+    Numpad0,
+    Numpad1,
+    Numpad2,
+    Numpad3,
+    Numpad4,
+    Numpad5,
+    Numpad6,
+    Numpad7,
+    Numpad8,
+    Numpad9,
+    NumpadDecimal,
+    NumpadMultiply,
+    NumpadAdd,
+    NumpadSubtract,
+    NumpadDivide,
+    NumpadEnter,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -235,6 +278,74 @@ mod tests {
             repeat: false,
             source_os: PlatformKind::Windows,
         }));
+    }
+
+    #[test]
+    fn key_round_trips_every_protocol_1_1_punctuation_and_numpad_key() {
+        for key in [
+            Key::Minus,
+            Key::Equal,
+            Key::BracketLeft,
+            Key::BracketRight,
+            Key::Backslash,
+            Key::Semicolon,
+            Key::Quote,
+            Key::Backquote,
+            Key::Comma,
+            Key::Period,
+            Key::Slash,
+            Key::Numpad0,
+            Key::Numpad1,
+            Key::Numpad2,
+            Key::Numpad3,
+            Key::Numpad4,
+            Key::Numpad5,
+            Key::Numpad6,
+            Key::Numpad7,
+            Key::Numpad8,
+            Key::Numpad9,
+            Key::NumpadDecimal,
+            Key::NumpadMultiply,
+            Key::NumpadAdd,
+            Key::NumpadSubtract,
+            Key::NumpadDivide,
+            Key::NumpadEnter,
+        ] {
+            round_trip(Message::Input(InputMessage::Key {
+                key,
+                state: ButtonState::Pressed,
+                repeat: false,
+                source_os: PlatformKind::MacOs,
+            }));
+        }
+    }
+
+    /// Pins `Key`'s wire encoding. postcard encodes an enum variant as its
+    /// declaration index, so reordering or inserting a variant anywhere but
+    /// the end silently changes what every later key means to a peer built
+    /// from an older revision. The protocol 1.1 keys were appended after
+    /// `Unknown` for exactly this reason; this test is what keeps the next
+    /// addition honest too.
+    #[test]
+    fn key_wire_indices_are_stable() {
+        let index = |key: Key| postcard::to_allocvec(&key).unwrap()[0];
+        // Protocol 1.0 keys, unchanged.
+        assert_eq!(index(Key::A), 0);
+        assert_eq!(index(Key::Digit0), 26);
+        assert_eq!(index(Key::ShiftLeft), 36);
+        assert_eq!(index(Key::F1), 45);
+        assert_eq!(index(Key::ArrowUp), 57);
+        assert_eq!(index(Key::Space), 70);
+        assert_eq!(
+            postcard::to_allocvec(&Key::Unknown(5)).unwrap(),
+            vec![71, 5],
+            "Key::Unknown must keep wire index 71 and its payload"
+        );
+        // Protocol 1.1 keys, appended after Unknown.
+        assert_eq!(index(Key::Minus), 72);
+        assert_eq!(index(Key::Slash), 82);
+        assert_eq!(index(Key::Numpad0), 83);
+        assert_eq!(index(Key::NumpadEnter), 98);
     }
 
     #[test]

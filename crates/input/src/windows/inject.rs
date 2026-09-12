@@ -4,7 +4,7 @@
 
 use std::mem::size_of;
 
-use kvm_protocol::{ButtonState, InputMessage, MouseButton};
+use kvm_protocol::{ButtonState, InputMessage, MouseButton, PlatformKind};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -19,6 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::error::InputError;
 use crate::traits::{Inject, PointerGeometry};
+use crate::translate::is_injectable;
 use crate::windows::keycode::key_to_vk;
 
 /// Injects keyboard/mouse events on this machine via `SendInput`. No UAC
@@ -108,7 +109,19 @@ fn send(input: INPUT) -> Result<(), InputError> {
 impl Inject for WindowsInject {
     fn inject(&mut self, event: &InputMessage) -> Result<(), InputError> {
         match *event {
-            InputMessage::Key { key, state, .. } => {
+            InputMessage::Key {
+                key,
+                state,
+                source_os,
+                ..
+            } => {
+                // A raw code from another platform is that platform's
+                // number, not a Windows VK -- see `translate::is_injectable`.
+                if !is_injectable(key, source_os, PlatformKind::Windows) {
+                    return Err(InputError::Unsupported(format!(
+                        "{key:?} is a raw {source_os:?} key code with no meaning on Windows -- not injected"
+                    )));
+                }
                 let vk = key_to_vk(key).ok_or_else(|| {
                     InputError::Unsupported(format!("{key:?} has no Windows VK code"))
                 })?;

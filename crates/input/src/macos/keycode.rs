@@ -86,6 +86,35 @@ pub fn keycode_to_key(code: u16) -> Key {
         0x30 => Key::Tab,
         0x31 => Key::Space,
 
+        0x1B => Key::Minus,
+        0x18 => Key::Equal,
+        0x21 => Key::BracketLeft,
+        0x1E => Key::BracketRight,
+        0x2A => Key::Backslash,
+        0x29 => Key::Semicolon,
+        0x27 => Key::Quote,
+        0x32 => Key::Backquote,
+        0x2B => Key::Comma,
+        0x2F => Key::Period,
+        0x2C => Key::Slash,
+
+        0x52 => Key::Numpad0,
+        0x53 => Key::Numpad1,
+        0x54 => Key::Numpad2,
+        0x55 => Key::Numpad3,
+        0x56 => Key::Numpad4,
+        0x57 => Key::Numpad5,
+        0x58 => Key::Numpad6,
+        0x59 => Key::Numpad7,
+        0x5B => Key::Numpad8,
+        0x5C => Key::Numpad9,
+        0x41 => Key::NumpadDecimal,
+        0x43 => Key::NumpadMultiply,
+        0x45 => Key::NumpadAdd,
+        0x4E => Key::NumpadSubtract,
+        0x4B => Key::NumpadDivide,
+        0x4C => Key::NumpadEnter,
+
         other => Key::Unknown(other as u32),
     }
 }
@@ -174,6 +203,35 @@ pub fn key_to_keycode(key: Key) -> Option<u16> {
         Key::Tab => 0x30,
         Key::Space => 0x31,
 
+        Key::Minus => 0x1B,
+        Key::Equal => 0x18,
+        Key::BracketLeft => 0x21,
+        Key::BracketRight => 0x1E,
+        Key::Backslash => 0x2A,
+        Key::Semicolon => 0x29,
+        Key::Quote => 0x27,
+        Key::Backquote => 0x32,
+        Key::Comma => 0x2B,
+        Key::Period => 0x2F,
+        Key::Slash => 0x2C,
+
+        Key::Numpad0 => 0x52,
+        Key::Numpad1 => 0x53,
+        Key::Numpad2 => 0x54,
+        Key::Numpad3 => 0x55,
+        Key::Numpad4 => 0x56,
+        Key::Numpad5 => 0x57,
+        Key::Numpad6 => 0x58,
+        Key::Numpad7 => 0x59,
+        Key::Numpad8 => 0x5B,
+        Key::Numpad9 => 0x5C,
+        Key::NumpadDecimal => 0x41,
+        Key::NumpadMultiply => 0x43,
+        Key::NumpadAdd => 0x45,
+        Key::NumpadSubtract => 0x4E,
+        Key::NumpadDivide => 0x4B,
+        Key::NumpadEnter => 0x4C,
+
         Key::Unknown(code) if code <= u16::MAX as u32 => code as u16,
         Key::Unknown(_) => return None,
     })
@@ -256,7 +314,84 @@ mod tests {
         Key::Delete,
         Key::Tab,
         Key::Space,
+        Key::Minus,
+        Key::Equal,
+        Key::BracketLeft,
+        Key::BracketRight,
+        Key::Backslash,
+        Key::Semicolon,
+        Key::Quote,
+        Key::Backquote,
+        Key::Comma,
+        Key::Period,
+        Key::Slash,
+        Key::Numpad0,
+        Key::Numpad1,
+        Key::Numpad2,
+        Key::Numpad3,
+        Key::Numpad4,
+        Key::Numpad5,
+        Key::Numpad6,
+        Key::Numpad7,
+        Key::Numpad8,
+        Key::Numpad9,
+        Key::NumpadDecimal,
+        Key::NumpadMultiply,
+        Key::NumpadAdd,
+        Key::NumpadSubtract,
+        Key::NumpadDivide,
+        Key::NumpadEnter,
     ];
+
+    /// **Regression test for the Phase 4 acceptance-run keyboard failure**
+    /// (ADR-0007's 2026-09-12 update), using the raw codes from the real
+    /// hub log verbatim. Every one of these left the Mac as
+    /// `Key::Unknown(code)`, and the Windows injector pressed whatever key
+    /// Windows assigns that same *number* — noted per line. Each must now
+    /// be captured as its named key.
+    #[test]
+    fn punctuation_and_numpad_codes_from_the_acceptance_log_are_named_not_unknown() {
+        let observed = [
+            (50, Key::Backquote),      // logged x14; Windows typed the digit 2
+            (76, Key::NumpadEnter),    // logged x32; Windows typed L
+            (92, Key::Numpad9),        // Windows pressed the Windows key
+            (33, Key::BracketLeft),    // Windows pressed Page Up
+            (27, Key::Minus),          // Windows pressed Escape
+            (39, Key::Quote),          // Windows pressed Right arrow
+            (44, Key::Slash),          // Windows pressed Print Screen
+            (43, Key::Comma),          // Windows: no-op VK, "not working"
+            (47, Key::Period),         // Windows: no-op VK
+            (41, Key::Semicolon),      // Windows: no-op VK
+            (30, Key::BracketRight),   // Windows: no-op VK
+            (42, Key::Backslash),      // Windows: no-op VK
+            (24, Key::Equal),          // Windows: no-op VK
+            (82, Key::Numpad0),        // Windows typed R
+            (83, Key::Numpad1),        // S
+            (84, Key::Numpad2),        // T
+            (85, Key::Numpad3),        // U
+            (86, Key::Numpad4),        // V
+            (88, Key::Numpad6),        // X
+            (89, Key::Numpad7),        // Y
+            (67, Key::NumpadMultiply), // C
+            (69, Key::NumpadAdd),      // E
+            (75, Key::NumpadDivide),   // K
+            (78, Key::NumpadSubtract), // N
+        ];
+        for (code, expected) in observed {
+            assert_eq!(
+                keycode_to_key(code),
+                expected,
+                "macOS keycode {code} ({code:#x}) must be captured as {expected:?}, not Unknown"
+            );
+        }
+
+        // Also in the log (x4; Windows typed G): keypad Clear, which sits
+        // where Num Lock does on a PC keypad but has no equivalent key
+        // there. Deliberately still `Unknown` -- and therefore refused by
+        // any non-macOS injector (see `translate::is_injectable`) rather
+        // than typing a letter.
+        assert_eq!(keycode_to_key(0x47), Key::Unknown(0x47));
+    }
 
     #[test]
     fn every_mapped_key_round_trips_through_the_macos_code() {

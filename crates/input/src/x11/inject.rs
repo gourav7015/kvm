@@ -2,7 +2,7 @@
 //! other half of the "thin shim" alongside [`crate::x11::capture`] —
 //! pure event-shape conversion, no cross-platform translation logic.
 
-use kvm_protocol::{ButtonState, InputMessage, MouseButton};
+use kvm_protocol::{ButtonState, InputMessage, MouseButton, PlatformKind};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _, KEY_PRESS_EVENT,
@@ -13,6 +13,7 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::error::InputError;
 use crate::traits::{Inject, PointerGeometry};
+use crate::translate::is_injectable;
 use crate::x11::keymap::KeyMap;
 use crate::x11::keysym::key_to_keysym;
 
@@ -56,7 +57,19 @@ impl X11Inject {
 impl Inject for X11Inject {
     fn inject(&mut self, event: &InputMessage) -> Result<(), InputError> {
         match *event {
-            InputMessage::Key { key, state, .. } => {
+            InputMessage::Key {
+                key,
+                state,
+                source_os,
+                ..
+            } => {
+                // A raw code from another platform is that platform's
+                // number, not an X11 keysym -- see `translate::is_injectable`.
+                if !is_injectable(key, source_os, PlatformKind::Linux) {
+                    return Err(InputError::Unsupported(format!(
+                        "{key:?} is a raw {source_os:?} key code with no meaning on X11 -- not injected"
+                    )));
+                }
                 let keysym = key_to_keysym(key);
                 let Some(keycode) = self.keymap.key_to_keycode(key) else {
                     return Err(InputError::Unsupported(format!(

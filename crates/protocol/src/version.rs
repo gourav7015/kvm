@@ -12,7 +12,14 @@ pub const PROTOCOL_MAJOR: u8 = 1;
 /// Peers with the same major version but a different minor version are
 /// forward/backward compatible: newer minor versions only add optional
 /// behavior, never change or remove existing wire semantics.
-pub const PROTOCOL_MINOR: u8 = 0;
+///
+/// History:
+/// - **1.1** — `Key` gained 27 punctuation and numpad variants, appended
+///   after `Key::Unknown` so every 1.0 encoding is byte-identical (pinned
+///   by `key_wire_indices_are_stable`). A 1.0 peer cannot decode those new
+///   keys; everything else is unchanged in both directions. See ADR-0007's
+///   2026-09-12 update.
+pub const PROTOCOL_MINOR: u8 = 1;
 
 /// Checks whether a peer-reported major version is compatible with ours.
 ///

@@ -87,6 +87,16 @@ pub enum Effect {
     /// input source removes the pin entirely for the rest of the
     /// `Forwarding` session.
     RecenterLocal { x: i32, y: i32 },
+    /// Warp *our own* local cursor to `(x, y)` because ownership just
+    /// returned home across an edge — so the cursor reappears where the
+    /// pointer re-entered this screen, exactly as a target's cursor is
+    /// placed via [`Effect::Switch`]. Real hardware (ADR-0009 decision 22):
+    /// without it, the Mac cursor reappeared at the screen centre it had
+    /// been parked at (by [`Effect::RecenterLocal`]) while forwarding.
+    /// Emitted once per return, only for a return across an edge — an
+    /// emergency-chord or disconnect return has no entry point, and leaves
+    /// the cursor where it is.
+    LandLocal { x: i32, y: i32 },
 }
 
 /// Drives edge-switching from the capturing device's point of view.
@@ -399,15 +409,22 @@ impl Router {
             }
             OwnershipState::Local => {
                 self.state = OwnershipState::Local;
-                // Returned home. We have no ground truth for where the
-                // real local cursor now sits — the caller resyncs via
-                // `resync_position` from a live OS read; until then,
-                // best-effort mirror the same entry-position math using
-                // our own screen size as the destination.
+                // Returned home across `edge`: land our own cursor where
+                // the pointer re-enters this screen, using the same
+                // entry-position math as an outbound switch, nudged just
+                // inside the boundary for the same reason (landing exactly
+                // on it would sit inside the trigger zone for switching
+                // straight back out). See `Effect::LandLocal`.
                 if let Some(&source_size) = old_state_screen_size(old_state, &self.screen_sizes)
                     && let Some(&dest_size) = self.screen_sizes.get(&self.our_device_id)
                 {
-                    self.position = entry_position(edge, source_size, dest_size, coordinate);
+                    let entry = entry_position(edge, source_size, dest_size, coordinate);
+                    let landing = nudge_off_boundary(edge, entry, dest_size);
+                    self.position = landing;
+                    effects.push(Effect::LandLocal {
+                        x: landing.0,
+                        y: landing.1,
+                    });
                 }
             }
         }
@@ -611,6 +628,34 @@ mod tests {
             )),
             "the chord's Escape must not reach the target, got {effects:?}"
         );
+    }
+
+    /// Regression test for the Mac cursor reappearing at the screen
+    /// centre after returning home (real hardware, ADR-0009 decision 22):
+    /// a return across an edge must land our own cursor just inside the
+    /// edge it re-entered through, at the matching height.
+    #[test]
+    fn returning_home_lands_the_local_cursor_just_inside_the_edge_it_re_entered() {
+        let layout = layout_with(&[(US, Edge::Right, NEIGHBOR), (NEIGHBOR, Edge::Left, US)]);
+        let mut router = Router::new(US, PlatformKind::MacOs, layout, (1000, 800), (500, 400));
+        router.set_peer_connected(NEIGHBOR, (1000, 800));
+
+        router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 }); // out, lands at (5, 400)
+        router.handle_captured(InputMessage::MouseMove { dx: 0, dy: -100 }); // (5, 300) on NEIGHBOR
+        let effects = router.handle_captured(InputMessage::MouseMove { dx: -10, dy: 0 }); // back home
+
+        assert_eq!(router.state(), OwnershipState::Local);
+        // Re-entered through our Right edge at y=300: x nudged inside the
+        // edge by EDGE_MARGIN+1 (1000 - 1 - 5), same y.
+        assert!(
+            effects.contains(&Effect::LandLocal { x: 994, y: 300 }),
+            "expected LandLocal at (994, 300), got {effects:?}"
+        );
+
+        // The landing spot itself must not trigger a switch straight back.
+        let effects = router.handle_captured(InputMessage::MouseMove { dx: 1, dy: 0 });
+        assert_eq!(effects, vec![]);
+        assert_eq!(router.state(), OwnershipState::Local);
     }
 
     #[test]

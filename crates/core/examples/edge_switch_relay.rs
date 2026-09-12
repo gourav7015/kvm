@@ -273,10 +273,11 @@ mod real {
                         // that includes the cursor as actually drawn.
                         let ms = started.elapsed().as_millis();
                         println!(
-                            "cursor sensors t={ms}ms while {:?}: event-api={:?} window-server={:?}",
+                            "cursor sensors t={ms}ms while {:?}: event-api={:?} window-server={:?} visible={:?}",
                             session.ownership_state(),
                             geometry.cursor_position().ok(),
                             window_server_cursor(),
+                            cursor_visible(),
                         );
                         if let Some(dir) = &shots_dir {
                             let busy = screenshot
@@ -439,6 +440,25 @@ mod real {
 
     #[cfg(not(target_os = "macos"))]
     fn window_server_cursor() -> Option<(f64, f64)> {
+        None
+    }
+
+    /// Diagnostic only (ADR-0009 decision 22): whether macOS reports the
+    /// cursor visible. It is hidden for the whole of forwarding, so a
+    /// `true` while forwarding timestamps whatever re-showed it -- the
+    /// suspected effect of a three-finger gesture.
+    #[cfg(target_os = "macos")]
+    fn cursor_visible() -> Option<bool> {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGCursorIsVisible() -> i32;
+        }
+        // SAFETY: `CGCursorIsVisible` takes no arguments and only reads state.
+        Some(unsafe { CGCursorIsVisible() } != 0)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn cursor_visible() -> Option<bool> {
         None
     }
 

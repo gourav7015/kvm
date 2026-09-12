@@ -403,6 +403,15 @@ impl Session {
                 local_geometry.set_cursor_position(x, y)?;
                 return Ok(());
             }
+            Effect::LandLocal { x, y } => {
+                tracing::info!(
+                    x,
+                    y,
+                    "landing local cursor where the pointer re-entered this screen"
+                );
+                local_geometry.set_cursor_position(x, y)?;
+                return Ok(());
+            }
             Effect::Send { to, message } => {
                 // DIAGNOSTIC (Phase 4 pointer-range root-cause hunt):
                 // stage 3 -- exactly what goes onto the wire, immediately

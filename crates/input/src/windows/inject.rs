@@ -8,10 +8,11 @@ use kvm_protocol::{ButtonState, InputMessage, MouseButton, PlatformKind};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput, VK_NUMLOCK,
+    GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
+    MapVirtualKeyW, SendInput, VK_CAPITAL, VK_NUMLOCK,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos, XBUTTON1,
@@ -71,13 +72,37 @@ fn key_flags(vk: u16, pressed: bool) -> KEYBD_EVENT_FLAGS {
     flags
 }
 
+/// The hardware scan code sent alongside `vk`: Num Lock's real one (looked
+/// up with `MapVirtualKeyW`, not hard-coded), 0 for every other key.
+/// Real hardware: Num Lock sent with the extended flag but scan code 0 did
+/// not toggle Windows' Num Lock, while Microsoft's own `keybd_event`
+/// sample for toggling it passes the key's scan code too — this matches
+/// that sample exactly. Other keys already work with 0 and are unchanged.
+fn key_scan_code(vk: u16) -> u16 {
+    if vk != VK_NUMLOCK.0 {
+        return 0;
+    }
+    // SAFETY: `MapVirtualKeyW` takes two plain integers and returns one;
+    // no pointers or buffers are involved.
+    unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) as u16 }
+}
+
+/// Whether Windows currently has `vk`'s toggle (Caps/Num Lock) on — the
+/// low bit of `GetKeyState`. Diagnostic only: logged around lock-key
+/// injections so a real-hardware run shows whether the toggle happened.
+fn toggle_state(vk: u16) -> bool {
+    // SAFETY: `GetKeyState` takes a plain virtual-key code and returns a
+    // plain integer; no pointers or buffers are involved.
+    unsafe { GetKeyState(i32::from(vk)) & 1 == 1 }
+}
+
 fn keyboard_input(vk: u16, pressed: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(vk),
-                wScan: 0,
+                wScan: key_scan_code(vk),
                 dwFlags: key_flags(vk, pressed),
                 time: 0,
                 dwExtraInfo: 0,
@@ -136,7 +161,21 @@ impl Inject for WindowsInject {
                 let vk = key_to_vk(key).ok_or_else(|| {
                     InputError::Unsupported(format!("{key:?} has no Windows VK code"))
                 })?;
-                send(keyboard_input(vk.0, state == ButtonState::Pressed))
+                let is_lock_key = vk == VK_NUMLOCK || vk == VK_CAPITAL;
+                let before = is_lock_key.then(|| toggle_state(vk.0));
+                let result = send(keyboard_input(vk.0, state == ButtonState::Pressed));
+                if let Some(before) = before {
+                    tracing::info!(
+                        ?key,
+                        ?state,
+                        scan_code = key_scan_code(vk.0),
+                        sent = result.is_ok(),
+                        toggle_before = before,
+                        toggle_after = toggle_state(vk.0),
+                        "WindowsInject: lock key injected"
+                    );
+                }
+                result
             }
             InputMessage::MouseMove { dx, dy } => {
                 // Real hardware finding (Mac->Windows QA, ADR-0009): a

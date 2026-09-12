@@ -1224,3 +1224,48 @@ production fix waits for that result.
 
 Also in this change (ADR-0007's 2026-09-12 update): Caps Lock and Num
 Lock now reach the target.
+
+### 22. The local cursor lands where the pointer re-entered; Num Lock sent with its scan code; gesture trigger still unreproduced in a log
+
+**Update (2026-09-12):** the acceptance run of `76217ff` confirmed the
+early-switch fix (decision 21), Caps Lock, and cursor hiding for
+ordinary use. Three findings:
+
+**The Mac cursor reappeared at the screen centre after every return.**
+`Effect::RecenterLocal` parks the local cursor at the centre when
+ownership leaves; the router computed where the pointer re-enters on
+return (`entry_position`) but never moved the cursor there, so it
+reappeared wherever it had been parked. New `Effect::LandLocal`: on a
+return across an edge the router lands the local cursor at the entry
+point, nudged just inside the boundary exactly like an outbound landing
+(`nudge_off_boundary`) so the landing spot cannot re-trigger a switch;
+`Session` applies it through `PointerGeometry::set_cursor_position`, the
+same single warp the target side and `RecenterLocal` already use —
+nothing is warped per event. An emergency-chord or disconnect return
+has no entry point and leaves the cursor where it is. Regression test:
+`returning_home_lands_the_local_cursor_just_inside_the_edge_it_re_entered`.
+
+**Num Lock still did nothing on Windows**, although the Mac sent it
+correctly (11 `NumLock` press/release pairs in the hub log). The one
+difference between `WindowsInject` and Microsoft's own `keybd_event`
+sample for toggling Num Lock was the scan code: the sample passes the
+key's real scan code with `KEYEVENTF_EXTENDEDKEY`; the injector passed
+0. It now passes `MapVirtualKeyW(VK_NUMLOCK, MAPVK_VK_TO_VSC)` for Num
+Lock only (every other key already works and is unchanged), and logs
+Windows' toggle state (`GetKeyState` low bit) before and after every
+Caps/Num Lock injection, so the next run shows whether the toggle
+happened. Separately: number-pad keys are injected as `VK_NUMPAD*`,
+which types digits regardless of Num Lock — whether Num Lock-off
+navigation (keypad 7 = Home) is expected is being confirmed with the
+user before any change there.
+
+**Gestures.** The user reports that a trackpad gesture while forwarding
+brings the cursor back and makes both cursors move together until the
+next full switch cycle. The hub log of this run does not show it: all
+14 returns were ordinary leftward motion (per-event deltas of −1 to −50,
+no jumps), the WindowServer's cursor position never moved during 609
+readings while forwarding, and the cursor was hidden at every switch.
+The relay now also logs cursor visibility every tick while forwarding,
+so a gesture that re-shows the cursor is timestamped next time, and
+`mac_gesture_probe` (decision 21) is still to be run. No gesture fix
+until that evidence exists.

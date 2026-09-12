@@ -195,6 +195,9 @@ pub enum InputMessage {
         button: MouseButton,
         state: ButtonState,
     },
+    /// `dx`/`dy` in 1/120 of a wheel notch (Windows' `WHEEL_DELTA`; a notch
+    /// is 3 lines, so one line is 40). Every backend converts to and from
+    /// this unit — see `kvm_input::scroll` and ADR-0007's scroll update.
     MouseScroll {
         dx: i32,
         dy: i32,

@@ -7,6 +7,7 @@ use core_graphics::geometry::CGPoint;
 use kvm_protocol::{ButtonState, InputMessage, Key, MouseButton, PlatformKind};
 
 use crate::macos::keycode::keycode_to_key;
+use crate::scroll::units_from_lines;
 
 /// Tags a `CGEvent` this process posted itself (e.g. an absolute
 /// cursor warp from `MacInject::set_cursor_position`), written into
@@ -170,11 +171,20 @@ pub fn to_input_message(
             state: ButtonState::Released,
         }),
         CGEventType::ScrollWheel => {
+            // The fixed-point line deltas, converted to the protocol's
+            // scroll unit (`crate::scroll`). Not the integer
+            // `SCROLL_WHEEL_EVENT_DELTA_AXIS_*` fields: they round each
+            // event to whole lines, and real hardware showed 110 of 617
+            // trackpad scroll events rounded to 0.
             let dy =
-                event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1) as i32;
+                units_from_lines(event.get_double_value_field(
+                    EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
+                ));
             let dx =
-                event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2) as i32;
-            Some(InputMessage::MouseScroll { dx, dy })
+                units_from_lines(event.get_double_value_field(
+                    EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
+                ));
+            (dx != 0 || dy != 0).then_some(InputMessage::MouseScroll { dx, dy })
         }
         _ => None,
     }

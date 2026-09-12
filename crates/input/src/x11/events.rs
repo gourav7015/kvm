@@ -8,6 +8,7 @@ use x11rb::protocol::xinput::{
 };
 
 use super::keymap::KeyMap;
+use crate::scroll::UNITS_PER_NOTCH;
 
 /// Converts a captured `RawKeyPress`/`RawKeyRelease` event into an
 /// [`InputMessage`]. `pressed` distinguishes which of the two XI2 event
@@ -61,13 +62,25 @@ pub fn button_event_to_message(event: &RawButtonPressEvent, pressed: bool) -> Op
 /// `None` if this button isn't a scroll button.
 pub fn scroll_delta_for_button(event: &RawButtonPressEvent) -> Option<InputMessage> {
     // The classic X11 scroll-wheel-as-buttons convention: 4 = up,
-    // 5 = down, 6 = left, 7 = right. One notch per event, matching the
-    // Windows backend's one-notch-per-event WHEEL_DELTA handling.
+    // 5 = down, 6 = left, 7 = right. One notch per event, in the
+    // protocol's scroll unit (`crate::scroll`).
     match event.detail {
-        4 => Some(InputMessage::MouseScroll { dx: 0, dy: 1 }),
-        5 => Some(InputMessage::MouseScroll { dx: 0, dy: -1 }),
-        6 => Some(InputMessage::MouseScroll { dx: -1, dy: 0 }),
-        7 => Some(InputMessage::MouseScroll { dx: 1, dy: 0 }),
+        4 => Some(InputMessage::MouseScroll {
+            dx: 0,
+            dy: UNITS_PER_NOTCH,
+        }),
+        5 => Some(InputMessage::MouseScroll {
+            dx: 0,
+            dy: -UNITS_PER_NOTCH,
+        }),
+        6 => Some(InputMessage::MouseScroll {
+            dx: -UNITS_PER_NOTCH,
+            dy: 0,
+        }),
+        7 => Some(InputMessage::MouseScroll {
+            dx: UNITS_PER_NOTCH,
+            dy: 0,
+        }),
         _ => None,
     }
 }
@@ -251,21 +264,22 @@ mod tests {
 
     #[test]
     fn scroll_wheel_directions_produce_one_notch_each() {
+        let notch = crate::scroll::UNITS_PER_NOTCH;
         assert_eq!(
             scroll_delta_for_button(&button_event(4)),
-            Some(InputMessage::MouseScroll { dx: 0, dy: 1 })
+            Some(InputMessage::MouseScroll { dx: 0, dy: notch })
         );
         assert_eq!(
             scroll_delta_for_button(&button_event(5)),
-            Some(InputMessage::MouseScroll { dx: 0, dy: -1 })
+            Some(InputMessage::MouseScroll { dx: 0, dy: -notch })
         );
         assert_eq!(
             scroll_delta_for_button(&button_event(6)),
-            Some(InputMessage::MouseScroll { dx: -1, dy: 0 })
+            Some(InputMessage::MouseScroll { dx: -notch, dy: 0 })
         );
         assert_eq!(
             scroll_delta_for_button(&button_event(7)),
-            Some(InputMessage::MouseScroll { dx: 1, dy: 0 })
+            Some(InputMessage::MouseScroll { dx: notch, dy: 0 })
         );
     }
 

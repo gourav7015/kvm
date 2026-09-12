@@ -12,6 +12,7 @@ use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
 use crate::error::InputError;
+use crate::scroll::{UNITS_PER_NOTCH, take_whole_steps};
 use crate::traits::{Inject, PointerGeometry};
 use crate::translate::is_injectable;
 use crate::x11::keymap::KeyMap;
@@ -41,6 +42,9 @@ pub struct X11Inject {
     conn: RustConnection,
     keymap: KeyMap,
     root: Window,
+    /// Scroll units not yet worth a whole notch, carried into the next
+    /// scroll event (`crate::scroll::take_whole_steps`), as `(dx, dy)`.
+    scroll_remainder: (i32, i32),
 }
 
 impl X11Inject {
@@ -50,7 +54,12 @@ impl X11Inject {
         })?;
         let keymap = KeyMap::query(&conn).map_err(InputError::InjectFailed)?;
         let root = conn.setup().roots[screen_num].root;
-        Ok(Self { conn, keymap, root })
+        Ok(Self {
+            conn,
+            keymap,
+            root,
+            scroll_remainder: (0, 0),
+        })
     }
 }
 
@@ -129,22 +138,25 @@ impl Inject for X11Inject {
             }
             InputMessage::MouseScroll { dx, dy } => {
                 // The classic X11 scroll-wheel-as-buttons convention —
-                // see events.rs's capture-side note. Each unit of dx/dy
-                // becomes that many synthetic press+release pairs on
-                // the corresponding scroll button; multi-notch scrolls
-                // arrive from the sender pre-summed into one dy/dx, so
-                // this loop is normally 0 or 1 iterations, not a
-                // per-hardware-tick flood.
-                if dy != 0 {
-                    let button = if dy > 0 { 4 } else { 5 };
-                    for _ in 0..dy.unsigned_abs() {
+                // see events.rs's capture-side note. The protocol's units
+                // (`crate::scroll`) become whole notches, the remainder
+                // carried into the next event, and each notch one
+                // synthetic press+release pair on the scroll button.
+                let (notches_y, rest_y) =
+                    take_whole_steps(self.scroll_remainder.1.saturating_add(dy), UNITS_PER_NOTCH);
+                let (notches_x, rest_x) =
+                    take_whole_steps(self.scroll_remainder.0.saturating_add(dx), UNITS_PER_NOTCH);
+                self.scroll_remainder = (rest_x, rest_y);
+                if notches_y != 0 {
+                    let button = if notches_y > 0 { 4 } else { 5 };
+                    for _ in 0..notches_y.unsigned_abs() {
                         self.fake_input(BUTTON_PRESS_EVENT, button, 0, 0)?;
                         self.fake_input(BUTTON_RELEASE_EVENT, button, 0, 0)?;
                     }
                 }
-                if dx != 0 {
-                    let button = if dx > 0 { 7 } else { 6 };
-                    for _ in 0..dx.unsigned_abs() {
+                if notches_x != 0 {
+                    let button = if notches_x > 0 { 7 } else { 6 };
+                    for _ in 0..notches_x.unsigned_abs() {
                         self.fake_input(BUTTON_PRESS_EVENT, button, 0, 0)?;
                         self.fake_input(BUTTON_RELEASE_EVENT, button, 0, 0)?;
                     }

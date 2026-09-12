@@ -25,6 +25,7 @@ mod x11;
 
 pub use error::InputError;
 pub use traits::{Capture, Inject, PointerGeometry};
+pub mod scroll;
 pub use translate::translate_for_target;
 
 #[cfg(target_os = "macos")]

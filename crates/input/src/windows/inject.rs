@@ -293,7 +293,9 @@ impl Inject for WindowsInject {
                 // here (MOUSEEVENTF_HWHEEL exists but the portable
                 // `MouseScroll.dx` axis is left unsupported for now,
                 // matching the macOS backend's vertical-first scope);
-                // only the vertical delta is injected.
+                // only the vertical delta is injected. `dy` is already in
+                // `WHEEL_DELTA` units -- the protocol's scroll unit (see
+                // `crate::scroll`), so it passes through unchanged.
                 send(mouse_input(0, 0, dy as u32, MOUSEEVENTF_WHEEL.0))
             }
         }

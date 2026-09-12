@@ -148,6 +148,26 @@ Enter are unaffected. Whether an injected Num Lock actually toggles
 Windows' state is logged (`toggle_before`/`toggle_after`) and still to
 be confirmed on hardware.
 
+*Third follow-up, same day — scroll unit.* Caps Lock, Num Lock and the
+gesture fix passed on hardware; two-finger scrolling on Windows was far
+too slow. `InputMessage::MouseScroll` had no defined unit, and each
+backend used its own: the macOS capture sent whole lines, the Windows
+capture and injector used `WHEEL_DELTA` (120 per notch), the X11 capture
+and injector one per wheel click, the macOS injector pixels. The hub log
+shows 617 scroll events sent to Windows with a mean |dy| of 2 — each
+scrolled Windows by ~2/120 of a notch, ~60 times too little (X11->Windows
+had the same defect; Windows->X11 would have been ~120 times too much).
+The unit is now defined as **1/120 of a wheel notch** (Windows'
+`WHEEL_DELTA`; a notch is 3 lines, Windows' default, so a line is 40),
+in `kvm_input::scroll`. The Windows backend already used it and is
+unchanged. The macOS capture converts its *fixed-point* line deltas (the
+integer fields rounded 110 of those 617 trackpad events to 0), so a line
+scrolled on the Mac scrolls a line on Windows. The X11 capture sends a
+notch as 120. The macOS and X11 injectors turn units into whole lines /
+notches and carry the remainder into the next event, so fine deltas add
+up to the full distance. No wire format change. The X11 and macOS-target
+scroll paths are unverified on hardware.
+
 Known, documented limits of this change: keys that remain unnamed
 (macOS keypad Clear and keypad `=`, the ISO `§` key, F13+, media keys)
 are now refused cross-platform — logged, not typed as some unrelated

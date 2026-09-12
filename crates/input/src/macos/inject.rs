@@ -9,15 +9,20 @@ use kvm_protocol::{ButtonState, InputMessage, MouseButton, PlatformKind};
 use crate::error::InputError;
 use crate::macos::keycode::key_to_keycode;
 use crate::macos::permission::has_accessibility_permission;
+use crate::scroll::{UNITS_PER_LINE, take_whole_steps};
 use crate::traits::{Inject, PointerGeometry};
 use crate::translate::is_injectable;
 
 #[derive(Default)]
-pub struct MacInject;
+pub struct MacInject {
+    /// Scroll units not yet worth a whole line, carried into the next
+    /// scroll event (`crate::scroll::take_whole_steps`), as `(dx, dy)`.
+    scroll_remainder: (i32, i32),
+}
 
 impl MacInject {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -122,12 +127,28 @@ impl Inject for MacInject {
                 Ok(())
             }
             InputMessage::MouseScroll { dx, dy } => {
+                // Protocol units (`crate::scroll`) to whole lines, carrying
+                // the remainder, so fine deltas still add up.
+                let (lines_y, rest_y) =
+                    take_whole_steps(self.scroll_remainder.1.saturating_add(dy), UNITS_PER_LINE);
+                let (lines_x, rest_x) =
+                    take_whole_steps(self.scroll_remainder.0.saturating_add(dx), UNITS_PER_LINE);
+                self.scroll_remainder = (rest_x, rest_y);
+                if lines_x == 0 && lines_y == 0 {
+                    return Ok(());
+                }
                 let source = event_source()?;
-                let cg_event =
-                    CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, 2, dy, dx, 0)
-                        .map_err(|()| {
-                            InputError::InjectFailed("failed to create scroll CGEvent".to_string())
-                        })?;
+                let cg_event = CGEvent::new_scroll_event(
+                    source,
+                    ScrollEventUnit::LINE,
+                    2,
+                    lines_y,
+                    lines_x,
+                    0,
+                )
+                .map_err(|()| {
+                    InputError::InjectFailed("failed to create scroll CGEvent".to_string())
+                })?;
                 cg_event.post(CGEventTapLocation::HID);
                 Ok(())
             }

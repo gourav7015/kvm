@@ -189,6 +189,27 @@ setting on (or fn held) the keys arrive as ordinary F1–F12 presses,
 which are already mapped and forwarded. Media actions are not forwarded.
 Modifier mapping: see decision 3's 2026-09-13 update.
 
+*Update (2026-09-13) — mouse buttons and horizontal scrolling.* The
+owner asked for a mouse to behave on every machine exactly as it does on
+the one it is plugged into. Code review found extra buttons broken
+everywhere: `MouseButton::Other(n)` carried each OS's *own* number, the
+macOS capture reported every extra button as a middle click, the Windows
+capture ignored X buttons, the Windows injector pressed X button 1 for
+every extra button, and only X11 -> X11 worked — so a Mac mouse's Back
+button middle-clicked on Linux and Windows. `Other(n)` is now defined as
+the mouse's own **USB HID button number** (4 Back, 5 Forward, 6+
+further), converted to and from each OS's numbering in `kvm_input::mouse`
+(macOS button number = n − 1; X11 button = n + 4 from 4; Windows X
+buttons 1/2 for Back/Forward, buttons beyond Forward refused on Windows
+with `Unsupported`, since it has none). The wire format is unchanged
+(still `Other(u8)`); only its meaning is now fixed. **Horizontal
+scrolling** was dropped by the Windows injector; it now injects
+`MOUSEEVENTF_HWHEEL`, and the Windows capture reports `WM_MOUSEHWHEEL`.
+Direction is defined as `dx` positive = right (Windows' and X11's own);
+macOS's horizontal axis is positive toward the left per Apple's
+documentation, so the macOS capture and injector negate it — the one
+detail not measured here, to be confirmed on hardware.
+
 Known, documented limits of this change: keys that remain unnamed
 (macOS keypad Clear and keypad `=`, the ISO `§` key, F13+, media keys)
 are now refused cross-platform — logged, not typed as some unrelated

@@ -7,6 +7,7 @@ use core_graphics::geometry::CGPoint;
 use kvm_protocol::{ButtonState, InputMessage, Key, MouseButton, PlatformKind};
 
 use crate::macos::keycode::keycode_to_key;
+use crate::mouse::from_macos_button_number;
 use crate::scroll::units_from_lines;
 
 /// Tags a `CGEvent` this process posted itself (e.g. an absolute
@@ -162,14 +163,22 @@ pub fn to_input_message(
             button: MouseButton::Right,
             state: ButtonState::Released,
         }),
-        CGEventType::OtherMouseDown => Some(InputMessage::MouseButton {
-            button: MouseButton::Middle,
-            state: ButtonState::Pressed,
-        }),
-        CGEventType::OtherMouseUp => Some(InputMessage::MouseButton {
-            button: MouseButton::Middle,
-            state: ButtonState::Released,
-        }),
+        // Middle, Back, Forward and any further button all arrive as
+        // "other"; which one is in the button-number field. Reported in the
+        // protocol's platform-neutral numbering (`crate::mouse`) -- this
+        // used to report every one of them as a middle click.
+        CGEventType::OtherMouseDown | CGEventType::OtherMouseUp => {
+            Some(InputMessage::MouseButton {
+                button: from_macos_button_number(
+                    event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER),
+                ),
+                state: if matches!(event_type, CGEventType::OtherMouseDown) {
+                    ButtonState::Pressed
+                } else {
+                    ButtonState::Released
+                },
+            })
+        }
         CGEventType::ScrollWheel => {
             // The fixed-point line deltas, converted to the protocol's
             // scroll unit (`crate::scroll`). Not the integer
@@ -180,8 +189,10 @@ pub fn to_input_message(
                 units_from_lines(event.get_double_value_field(
                     EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
                 ));
+            // Negated: macOS's horizontal axis is positive toward the
+            // *left*, the protocol's `dx` is positive toward the right.
             let dx =
-                units_from_lines(event.get_double_value_field(
+                -units_from_lines(event.get_double_value_field(
                     EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
                 ));
             (dx != 0 || dy != 0).then_some(InputMessage::MouseScroll { dx, dy })

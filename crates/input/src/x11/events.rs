@@ -46,13 +46,10 @@ pub fn button_event_to_message(event: &RawButtonPressEvent, pressed: bool) -> Op
     } else {
         ButtonState::Released
     };
-    let button = match event.detail {
-        1 => MouseButton::Left,
-        2 => MouseButton::Middle,
-        3 => MouseButton::Right,
-        4..=7 => return None, // Scroll — see scroll_delta_for_button.
-        other => MouseButton::Other(other.min(u32::from(u8::MAX)) as u8),
-    };
+    // In the protocol's platform-neutral numbering (`crate::mouse`): X11's
+    // Back/Forward (8/9) become Other(4)/Other(5). Buttons 4–7 are the
+    // scroll wheel -- see scroll_delta_for_button.
+    let button: MouseButton = crate::mouse::from_x11_button(event.detail)?;
     Some(InputMessage::MouseButton { button, state })
 }
 
@@ -253,11 +250,20 @@ mod tests {
 
     #[test]
     fn extra_buttons_beyond_scroll_map_to_other() {
+        // X11's Back/Forward (8/9) arrive in the protocol's
+        // platform-neutral numbering (`crate::mouse`): HID 4/5.
         assert_eq!(
             button_event_to_message(&button_event(8), true),
             Some(InputMessage::MouseButton {
-                button: MouseButton::Other(8),
+                button: MouseButton::Other(crate::mouse::BACK),
                 state: ButtonState::Pressed
+            })
+        );
+        assert_eq!(
+            button_event_to_message(&button_event(9), false),
+            Some(InputMessage::MouseButton {
+                button: MouseButton::Other(crate::mouse::FORWARD),
+                state: ButtonState::Released
             })
         );
     }

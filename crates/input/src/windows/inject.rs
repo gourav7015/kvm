@@ -10,13 +10,13 @@ use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
-    MapVirtualKeyW, SendInput, VK_CAPITAL, VK_NUMLOCK,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
+    MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyW, SendInput, VK_CAPITAL, VK_NUMLOCK,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos, XBUTTON1,
+    GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos,
 };
 
 use crate::error::InputError;
@@ -268,35 +268,47 @@ impl Inject for WindowsInject {
                 result
             }
             InputMessage::MouseButton { button, state } => {
-                // "Other" extra buttons have no dedicated MOUSEEVENTF_*
-                // flag; approximate with XBUTTON1 rather than failing
-                // the whole event, matching the macOS backend's
-                // Center-button approximation for the same case.
-                let (flag, mouse_data) = match (button, state) {
-                    (MouseButton::Left, ButtonState::Pressed) => (MOUSEEVENTF_LEFTDOWN, 0),
-                    (MouseButton::Left, ButtonState::Released) => (MOUSEEVENTF_LEFTUP, 0),
-                    (MouseButton::Right, ButtonState::Pressed) => (MOUSEEVENTF_RIGHTDOWN, 0),
-                    (MouseButton::Right, ButtonState::Released) => (MOUSEEVENTF_RIGHTUP, 0),
-                    (MouseButton::Middle, ButtonState::Pressed) => (MOUSEEVENTF_MIDDLEDOWN, 0),
-                    (MouseButton::Middle, ButtonState::Released) => (MOUSEEVENTF_MIDDLEUP, 0),
-                    (MouseButton::Other(_), ButtonState::Pressed) => {
-                        (MOUSEEVENTF_XDOWN, u32::from(XBUTTON1))
-                    }
-                    (MouseButton::Other(_), ButtonState::Released) => {
-                        (MOUSEEVENTF_XUP, u32::from(XBUTTON1))
+                let pressed = state == ButtonState::Pressed;
+                let (flag, mouse_data) = match button {
+                    MouseButton::Left if pressed => (MOUSEEVENTF_LEFTDOWN, 0),
+                    MouseButton::Left => (MOUSEEVENTF_LEFTUP, 0),
+                    MouseButton::Right if pressed => (MOUSEEVENTF_RIGHTDOWN, 0),
+                    MouseButton::Right => (MOUSEEVENTF_RIGHTUP, 0),
+                    MouseButton::Middle if pressed => (MOUSEEVENTF_MIDDLEDOWN, 0),
+                    MouseButton::Middle => (MOUSEEVENTF_MIDDLEUP, 0),
+                    // Back/Forward are Windows' X buttons 1/2 (see
+                    // `crate::mouse`). This used to press X button 1
+                    // (Back) for *every* extra button.
+                    MouseButton::Other(n) => {
+                        let Some(xbutton) = crate::mouse::to_windows_xbutton(button) else {
+                            return Err(InputError::Unsupported(format!(
+                                "mouse button {n} has no Windows equivalent -- Windows only \
+                                 has X buttons 1 and 2 (Back/Forward)"
+                            )));
+                        };
+                        let flag = if pressed {
+                            MOUSEEVENTF_XDOWN
+                        } else {
+                            MOUSEEVENTF_XUP
+                        };
+                        (flag, u32::from(xbutton))
                     }
                 };
                 send(mouse_input(0, 0, mouse_data, flag.0))
             }
-            InputMessage::MouseScroll { dy, .. } => {
-                // Windows has no horizontal-wheel equivalent wired up
-                // here (MOUSEEVENTF_HWHEEL exists but the portable
-                // `MouseScroll.dx` axis is left unsupported for now,
-                // matching the macOS backend's vertical-first scope);
-                // only the vertical delta is injected. `dy` is already in
-                // `WHEEL_DELTA` units -- the protocol's scroll unit (see
-                // `crate::scroll`), so it passes through unchanged.
-                send(mouse_input(0, 0, dy as u32, MOUSEEVENTF_WHEEL.0))
+            InputMessage::MouseScroll { dx, dy } => {
+                // Both axes are already in `WHEEL_DELTA` units -- the
+                // protocol's scroll unit (see `crate::scroll`) -- and in
+                // Windows' own directions (`dx` positive = right), so they
+                // pass through unchanged. Horizontal scrolling used to be
+                // dropped here.
+                if dy != 0 {
+                    send(mouse_input(0, 0, dy as u32, MOUSEEVENTF_WHEEL.0))?;
+                }
+                if dx != 0 {
+                    send(mouse_input(0, 0, dx as u32, MOUSEEVENTF_HWHEEL.0))?;
+                }
+                Ok(())
             }
         }
     }
@@ -370,6 +382,21 @@ mod tests {
         assert_eq!(
             key_flags(VK_NUMLOCK.0, false),
             KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY
+        );
+    }
+
+    /// `crate::mouse` hard-codes Windows' X button values so it can be
+    /// tested on every platform; pin them to the real constants here.
+    #[test]
+    fn back_and_forward_use_windows_own_x_button_values() {
+        use windows::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
+        assert_eq!(
+            crate::mouse::to_windows_xbutton(MouseButton::Other(crate::mouse::BACK)),
+            Some(XBUTTON1)
+        );
+        assert_eq!(
+            crate::mouse::to_windows_xbutton(MouseButton::Other(crate::mouse::FORWARD)),
+            Some(XBUTTON2)
         );
     }
 

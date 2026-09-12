@@ -23,7 +23,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
     PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
     WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 use crate::error::InputError;
@@ -142,6 +143,27 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 // extraction for this field.
                 let delta = (info.mouseData >> 16) as i16 as i32;
                 send(InputMessage::MouseScroll { dx: 0, dy: delta });
+            }
+            m if m == WM_MOUSEHWHEEL => {
+                // Same field, horizontal: positive is toward the right,
+                // the protocol's own `dx` direction.
+                let delta = (info.mouseData >> 16) as i16 as i32;
+                send(InputMessage::MouseScroll { dx: delta, dy: 0 });
+            }
+            m if m == WM_XBUTTONDOWN || m == WM_XBUTTONUP => {
+                // Which X button (1 = Back, 2 = Forward) is the high word
+                // of `mouseData`; reported in the protocol's
+                // platform-neutral numbering (`crate::mouse`).
+                let state = if m == WM_XBUTTONDOWN {
+                    ButtonState::Pressed
+                } else {
+                    ButtonState::Released
+                };
+                if let Some(button) =
+                    crate::mouse::from_windows_xbutton((info.mouseData >> 16) as u16)
+                {
+                    send(mouse_button(button, state));
+                }
             }
             _ => {}
         }

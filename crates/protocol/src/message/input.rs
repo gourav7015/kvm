@@ -20,7 +20,11 @@ pub enum MouseButton {
     Left,
     Right,
     Middle,
-    /// Any additional mouse button, identified by platform-reported index.
+    /// Any additional mouse button, by the mouse's own USB HID button
+    /// number — platform-neutral: 4 = Back, 5 = Forward, 6 and up further
+    /// buttons (1–3 are `Left`/`Right`/`Middle`). Each backend converts its
+    /// OS's numbering to and from this — see `kvm_input::mouse` and
+    /// ADR-0007's 2026-09-13 mouse update.
     Other(u8),
 }
 
@@ -198,6 +202,8 @@ pub enum InputMessage {
     /// `dx`/`dy` in 1/120 of a wheel notch (Windows' `WHEEL_DELTA`; a notch
     /// is 3 lines, so one line is 40). Every backend converts to and from
     /// this unit — see `kvm_input::scroll` and ADR-0007's scroll update.
+    /// Directions: `dy` positive scrolls up (wheel away from the user),
+    /// `dx` positive scrolls right — Windows' and X11's own conventions.
     MouseScroll {
         dx: i32,
         dy: i32,

@@ -2,7 +2,7 @@
 //! other half of the "thin shim" alongside [`crate::x11::capture`] —
 //! pure event-shape conversion, no cross-platform translation logic.
 
-use kvm_protocol::{ButtonState, InputMessage, Key, MouseButton, PlatformKind};
+use kvm_protocol::{ButtonState, InputMessage, Key, PlatformKind};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _, KEY_PRESS_EVENT,
@@ -156,12 +156,9 @@ impl Inject for X11Inject {
                 result
             }
             InputMessage::MouseButton { button, state } => {
-                let detail = match button {
-                    MouseButton::Left => 1,
-                    MouseButton::Middle => 2,
-                    MouseButton::Right => 3,
-                    MouseButton::Other(code) => code,
-                };
+                // From the protocol's platform-neutral numbering
+                // (`crate::mouse`): Back/Forward become X11's 8/9.
+                let detail = crate::mouse::to_x11_button(button);
                 let type_ = match state {
                     ButtonState::Pressed => BUTTON_PRESS_EVENT,
                     ButtonState::Released => BUTTON_RELEASE_EVENT,

@@ -1,7 +1,9 @@
 //! macOS injection via synthetic `CGEvent`s posted at the HID level.
 
 use core_graphics::display::CGDisplay;
-use core_graphics::event::{CGEvent, CGEventTapLocation, CGMouseButton, ScrollEventUnit};
+use core_graphics::event::{
+    CGEvent, CGEventTapLocation, CGMouseButton, EventField, ScrollEventUnit,
+};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 use kvm_protocol::{ButtonState, InputMessage, MouseButton, PlatformKind};
@@ -9,6 +11,7 @@ use kvm_protocol::{ButtonState, InputMessage, MouseButton, PlatformKind};
 use crate::error::InputError;
 use crate::macos::keycode::key_to_keycode;
 use crate::macos::permission::has_accessibility_permission;
+use crate::mouse::to_macos_button_number;
 use crate::scroll::{UNITS_PER_LINE, take_whole_steps};
 use crate::traits::{Inject, PointerGeometry};
 use crate::translate::is_injectable;
@@ -123,6 +126,14 @@ impl Inject for MacInject {
                             "failed to create mouse-button CGEvent".to_string(),
                         )
                     })?;
+                // Middle, Back, Forward and further buttons are all "other"
+                // mouse events; which one is the button-number field.
+                if matches!(button, MouseButton::Middle | MouseButton::Other(_)) {
+                    cg_event.set_integer_value_field(
+                        EventField::MOUSE_EVENT_BUTTON_NUMBER,
+                        to_macos_button_number(button),
+                    );
+                }
                 cg_event.post(CGEventTapLocation::HID);
                 Ok(())
             }
@@ -143,7 +154,9 @@ impl Inject for MacInject {
                     ScrollEventUnit::LINE,
                     2,
                     lines_y,
-                    lines_x,
+                    // macOS's horizontal axis is positive toward the left;
+                    // the protocol's `dx` toward the right.
+                    -lines_x,
                     0,
                 )
                 .map_err(|()| {

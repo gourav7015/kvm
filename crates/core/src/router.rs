@@ -231,6 +231,9 @@ impl Router {
         match event {
             InputMessage::MouseMove { dx, dy } => self.handle_mouse_move(dx, dy),
             InputMessage::Key { key, state, .. } => {
+                if state == ButtonState::Pressed && self.is_emergency_return_chord(key) {
+                    return self.emergency_return_to_local();
+                }
                 match state {
                     ButtonState::Pressed => self.held_keys.insert(key),
                     ButtonState::Released => self.held_keys.remove(&key),
@@ -411,6 +414,54 @@ impl Router {
         effects
     }
 
+    /// Whether pressing `key` completes the emergency return-to-local
+    /// chord: **Control + Option/Alt + Command/Meta + Escape**, either side
+    /// of each modifier, while `Forwarding`. See ADR-0009 decision 19.
+    ///
+    /// Decided entirely from this device's own captured input, never from
+    /// anything the target reports — which is the whole point: real
+    /// hardware found a target that was connected but had stopped
+    /// processing input (its console was paused), leaving this device's
+    /// local input suppressed with no way back short of killing the
+    /// target process. This chord works however the target has failed.
+    /// The modifiers were already forwarded as ordinary presses (they're
+    /// released on the old target by [`Self::emergency_return_to_local`]);
+    /// the `Escape` itself is never forwarded.
+    fn is_emergency_return_chord(&self, key: Key) -> bool {
+        const CHORD_MODIFIERS: [[Key; 2]; 3] = [
+            [Key::ControlLeft, Key::ControlRight],
+            [Key::AltLeft, Key::AltRight],
+            [Key::MetaLeft, Key::MetaRight],
+        ];
+        key == Key::Escape
+            && matches!(self.state, OwnershipState::Forwarding { .. })
+            && CHORD_MODIFIERS
+                .iter()
+                .all(|either_side| either_side.iter().any(|m| self.held_keys.contains(m)))
+    }
+
+    /// Returns ownership to `Local` right now, from any `Forwarding`
+    /// state, releasing every held key on the target being left so none
+    /// stays stuck there. The caller (`Session::handle_captured`) lifts
+    /// local suppression on seeing the `Forwarding` -> `Local` change,
+    /// exactly as for an ordinary return across an edge.
+    fn emergency_return_to_local(&mut self) -> Vec<Effect> {
+        let old_state = self.state;
+        tracing::warn!(
+            ?old_state,
+            "emergency return-to-local chord pressed -- giving local input back now"
+        );
+        let effects = self.flush_held_keys(old_state);
+        let ctx = ownership::SwitchContext {
+            our_device_id: self.our_device_id,
+            layout: &self.layout,
+            connected: &self.connected,
+            screen_sizes: &self.screen_sizes,
+        };
+        self.state = ownership::transition(old_state, OwnershipEvent::ReturnToLocal, &ctx);
+        effects
+    }
+
     /// On leaving a `Forwarding` state (to a new target or back to
     /// `Local`), synthesize a `Released` for every key we believe is
     /// still held on the old target, so a switch can never leave a
@@ -513,6 +564,103 @@ mod tests {
             repeat: false,
             source_os: PlatformKind::MacOs,
         }
+    }
+
+    fn press(router: &mut Router, key: Key) -> Vec<Effect> {
+        router.handle_captured(key_event(key, ButtonState::Pressed))
+    }
+
+    /// Regression test for the real-hardware stalled-target incident
+    /// (ADR-0009 decision 19): the target was connected but no longer
+    /// processing input, and nothing on this side could get local input
+    /// back. The chord must return to `Local` regardless of the target.
+    #[test]
+    fn the_emergency_chord_returns_to_local_while_forwarding() {
+        let mut router = router_with_right_neighbor();
+        router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
+        assert!(matches!(router.state(), OwnershipState::Forwarding { .. }));
+
+        press(&mut router, Key::ControlLeft);
+        press(&mut router, Key::AltLeft);
+        press(&mut router, Key::MetaLeft);
+        let effects = press(&mut router, Key::Escape);
+
+        assert_eq!(router.state(), OwnershipState::Local);
+        // Every held modifier is released on the target being left, so
+        // none stays stuck there.
+        for modifier in [Key::ControlLeft, Key::AltLeft, Key::MetaLeft] {
+            assert!(
+                effects.contains(&Effect::Send {
+                    to: NEIGHBOR,
+                    message: key_event(modifier, ButtonState::Released),
+                }),
+                "{modifier:?} must be released on the target, got {effects:?}"
+            );
+        }
+        // The Escape that completed the chord is never forwarded.
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::Send {
+                    message: InputMessage::Key {
+                        key: Key::Escape,
+                        ..
+                    },
+                    ..
+                }
+            )),
+            "the chord's Escape must not reach the target, got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn the_emergency_chord_accepts_either_side_of_each_modifier() {
+        let mut router = router_with_right_neighbor();
+        router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
+        press(&mut router, Key::ControlRight);
+        press(&mut router, Key::AltLeft);
+        press(&mut router, Key::MetaRight);
+        press(&mut router, Key::Escape);
+        assert_eq!(router.state(), OwnershipState::Local);
+    }
+
+    #[test]
+    fn escape_alone_or_an_incomplete_chord_is_forwarded_normally() {
+        let mut router = router_with_right_neighbor();
+        router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
+
+        // Plain Escape: an ordinary key for the target.
+        assert_eq!(
+            press(&mut router, Key::Escape),
+            vec![Effect::Send {
+                to: NEIGHBOR,
+                message: key_event(Key::Escape, ButtonState::Pressed),
+            }]
+        );
+        router.handle_captured(key_event(Key::Escape, ButtonState::Released));
+
+        // Control + Option + Escape, missing Command: still ordinary.
+        press(&mut router, Key::ControlLeft);
+        press(&mut router, Key::AltLeft);
+        let effects = press(&mut router, Key::Escape);
+        assert!(matches!(router.state(), OwnershipState::Forwarding { .. }));
+        assert_eq!(
+            effects,
+            vec![Effect::Send {
+                to: NEIGHBOR,
+                message: key_event(Key::Escape, ButtonState::Pressed),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_emergency_chord_does_nothing_special_while_already_local() {
+        let mut router = router_with_right_neighbor();
+        press(&mut router, Key::ControlLeft);
+        press(&mut router, Key::AltLeft);
+        press(&mut router, Key::MetaLeft);
+        assert_eq!(press(&mut router, Key::Escape), vec![]);
+        assert_eq!(router.state(), OwnershipState::Local);
     }
 
     #[test]

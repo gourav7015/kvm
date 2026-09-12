@@ -28,10 +28,12 @@
 //! (see the ADR); this call is harmless either way.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use kvm_input::{Capture, Inject, PointerGeometry};
 use kvm_net::{NetError, Peer};
 use kvm_protocol::{ControlMessage, DeviceId, InputMessage, Message};
+use tokio::time::Instant;
 
 use crate::error::CoreError;
 use crate::input_bridge::{LOCAL_PLATFORM, translate_for_local_platform};
@@ -46,7 +48,37 @@ use crate::router::{Effect, Router};
 pub struct Session {
     router: Router,
     peers: HashMap<DeviceId, Peer>,
+    /// When each peer last proved it is still *processing input* — see
+    /// [`TARGET_LIVENESS_TIMEOUT`]. Armed when a peer becomes the active
+    /// target; a peer with no entry is not monitored.
+    last_heard: HashMap<DeviceId, Instant>,
+    liveness_timeout: Duration,
+    next_ping_nonce: u64,
 }
+
+/// How long the active forwarding target may go without answering a
+/// `Ping` before this device gives up on it and takes local input back.
+/// See ADR-0009 decision 19.
+///
+/// **Why this exists — a real-hardware finding.** A target can stay
+/// *connected* while no longer processing input at all: on Windows,
+/// clicking into the relay's own console window started a QuickEdit
+/// selection, which pauses any write to that console, and the target's
+/// input loop writes a log line per injected event. QUIC kept the
+/// connection alive (its keep-alives run on other threads), so neither
+/// the transport's idle timeout nor the closed-connection watchdog could
+/// ever fire, and this device kept suppressing its own input while
+/// forwarding into the void — recovered only by killing the target.
+///
+/// A target answers a `Ping` from the same loop that injects input (see
+/// [`run_target`]), so answers stop exactly when injection stops. On a
+/// LAN an answer takes one round trip (milliseconds), and the caller
+/// pings several times a second, so 2 s is many missed answers — never
+/// ordinary jitter — while still handing a user who has lost their input
+/// back within a couple of seconds. It is a safety bound, not a tuning
+/// knob; it is deliberately far below QUIC's own 10 s idle timeout,
+/// which only ever catches connections that are actually gone.
+pub const TARGET_LIVENESS_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl Session {
     pub fn new(
@@ -64,7 +96,16 @@ impl Session {
                 initial_position,
             ),
             peers: HashMap::new(),
+            last_heard: HashMap::new(),
+            liveness_timeout: TARGET_LIVENESS_TIMEOUT,
+            next_ping_nonce: 0,
         }
+    }
+
+    /// Overrides [`TARGET_LIVENESS_TIMEOUT`] — for tests that need to
+    /// observe the timeout without waiting seconds for it.
+    pub fn set_liveness_timeout(&mut self, timeout: Duration) {
+        self.liveness_timeout = timeout;
     }
 
     pub fn ownership_state(&self) -> OwnershipState {
@@ -112,6 +153,7 @@ impl Session {
             OwnershipState::Forwarding { target, .. } if target == device_id
         );
         self.peers.remove(&device_id);
+        self.last_heard.remove(&device_id);
         self.router.set_peer_disconnected(device_id);
         if was_active_target {
             tracing::warn!(
@@ -154,6 +196,104 @@ impl Session {
     /// position on its own.
     pub fn resync_local_position(&mut self, x: i32, y: i32) {
         self.router.resync_position(x, y);
+    }
+
+    /// Sends a `Ping` to the current forwarding target (a no-op while
+    /// `Local`). Call it several times a second while `Forwarding`; the
+    /// answers are read by [`Self::recv_from_active_target`] and judged by
+    /// [`Self::check_target_liveness`]. A failed send means the connection
+    /// is gone: the peer is removed (restoring local input, via
+    /// [`Self::remove_peer`]) and returned.
+    pub async fn ping_active_target(
+        &mut self,
+        local_capture: &mut dyn Capture,
+    ) -> Option<DeviceId> {
+        let OwnershipState::Forwarding { target, .. } = self.router.state() else {
+            return None;
+        };
+        let peer = self.peers.get_mut(&target)?;
+        let nonce = self.next_ping_nonce;
+        self.next_ping_nonce = self.next_ping_nonce.wrapping_add(1);
+        let ping = Message::Control(ControlMessage::Ping { nonce });
+        match peer.streams.control.send(&ping).await {
+            Ok(()) => None,
+            Err(e) => {
+                tracing::warn!(?target, error = %e, "ping to active target failed");
+                self.remove_peer(target, local_capture);
+                Some(target)
+            }
+        }
+    }
+
+    /// Waits for the next control message from the current forwarding
+    /// target; pends forever while `Local`. Cancel-safe
+    /// (`MessageStream::recv` keeps partially-read frames in its own
+    /// buffer), so it can sit in a `select!` beside captured input and be
+    /// dropped whenever another branch wins. Hand the result to
+    /// [`Self::handle_target_control`].
+    pub async fn recv_from_active_target(&mut self) -> (DeviceId, Result<Message, NetError>) {
+        let OwnershipState::Forwarding { target, .. } = self.router.state() else {
+            return std::future::pending().await;
+        };
+        let Some(peer) = self.peers.get_mut(&target) else {
+            return std::future::pending().await;
+        };
+        (target, peer.streams.control.recv().await)
+    }
+
+    /// Applies one result from [`Self::recv_from_active_target`]: a `Pong`
+    /// proves `from` is still processing input; a broken stream means
+    /// it's gone, and is handled exactly like any other disconnect.
+    pub fn handle_target_control(
+        &mut self,
+        from: DeviceId,
+        result: Result<Message, NetError>,
+        local_capture: &mut dyn Capture,
+    ) {
+        match result {
+            Ok(Message::Control(ControlMessage::Pong { nonce })) => {
+                tracing::trace!(?from, nonce, "pong from target");
+                if self.peers.contains_key(&from) {
+                    self.last_heard.insert(from, Instant::now());
+                }
+            }
+            Ok(other) => {
+                tracing::warn!(
+                    ?from,
+                    ?other,
+                    "unexpected control message from target -- ignored"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(?from, error = %e, "control stream from target failed");
+                self.remove_peer(from, local_capture);
+            }
+        }
+    }
+
+    /// If the current forwarding target has not answered a `Ping` within
+    /// the liveness timeout ([`TARGET_LIVENESS_TIMEOUT`] by default), gives
+    /// up on it: the peer is removed — dropping the connection, so input
+    /// already queued for it is discarded rather than replayed if it ever
+    /// recovers — and local input comes back via [`Self::remove_peer`].
+    /// Returns the target given up on. A no-op while `Local`, or for a
+    /// target that was never armed.
+    pub fn check_target_liveness(&mut self, local_capture: &mut dyn Capture) -> Option<DeviceId> {
+        let OwnershipState::Forwarding { target, .. } = self.router.state() else {
+            return None;
+        };
+        let silent_for = self.last_heard.get(&target)?.elapsed();
+        if silent_for < self.liveness_timeout {
+            return None;
+        }
+        tracing::warn!(
+            ?target,
+            ?silent_for,
+            "active target is connected but has stopped answering pings -- \
+             it is no longer processing input; dropping it and giving local input back"
+        );
+        self.remove_peer(target, local_capture);
+        Some(target)
     }
 
     /// Processes one locally captured event end to end: asks `Router`
@@ -278,6 +418,14 @@ impl Session {
         match stream.send(&message).await {
             Ok(()) => {
                 tracing::trace!(?to, "send succeeded");
+                // Becoming the active target starts its liveness clock --
+                // see `TARGET_LIVENESS_TIMEOUT`.
+                if matches!(
+                    message,
+                    Message::Control(ControlMessage::SwitchActive { .. })
+                ) {
+                    self.last_heard.insert(to, Instant::now());
+                }
                 Ok(())
             }
             Err(NetError::ConnectionClosed) => {
@@ -348,6 +496,17 @@ pub async fn run_target(
                         // connection and injection loop carry on.
                         if let Err(e) = geometry.set_cursor_position(x, y) {
                             tracing::warn!(error = %e, x, y, "cursor warp failed -- continuing");
+                        }
+                    }
+                    // Answered from this same loop that injects input, so
+                    // answers stop exactly when injection stops -- which
+                    // is what the capturing device's liveness check needs
+                    // to see (`Session::check_target_liveness`, ADR-0009
+                    // decision 19).
+                    Ok(Message::Control(ControlMessage::Ping { nonce })) => {
+                        let pong = Message::Control(ControlMessage::Pong { nonce });
+                        if let Err(e) = control.send(&pong).await {
+                            return Err(CoreError::Net(e));
                         }
                     }
                     Ok(other) => {

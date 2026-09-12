@@ -1219,3 +1219,173 @@ async fn ownership_matrix_local_forwarding_keyboard_and_disconnect() {
     assert_eq!(session.ownership_state(), OwnershipState::Local);
     assert_eq!(local_capture.suppression_calls.last(), Some(&false));
 }
+
+/// Regression test for the real-hardware stalled-target incident (ADR-0009
+/// decision 19): the target stayed *connected* but stopped processing input
+/// (its console was paused mid-write), so the closed-connection watchdog
+/// could never fire and local input stayed suppressed until the target
+/// process was killed. Here the target end is held open but never read --
+/// pings go unanswered -- and local input must come back once the liveness
+/// timeout passes, not before.
+#[tokio::test]
+async fn a_connected_target_that_stops_answering_pings_hands_local_input_back() {
+    let hub = Device::new([0x71; 32]);
+    let target = Device::new([0x72; 32]);
+    // Held (not dropped) so the connection stays open, but never read.
+    let (hub_peer, _target_peer_never_read) = connect_pair(&hub, &target).await;
+
+    let mut session = Session::new(
+        hub.device_id,
+        two_device_layout(hub.device_id, target.device_id),
+        (1000, 800),
+        (500, 400),
+    );
+    session.set_liveness_timeout(std::time::Duration::from_millis(500));
+    session.add_peer(target.device_id, hub_peer, (1000, 800));
+    let mut geometry = FakeGeometry::new((500, 400));
+    let mut capture = FakeCapture::default();
+
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut geometry,
+            &mut capture,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.ownership_state(),
+        OwnershipState::Forwarding { .. }
+    ));
+    assert_eq!(capture.suppression_calls, vec![true]);
+
+    assert_eq!(session.ping_active_target(&mut capture).await, None);
+    assert_eq!(
+        session.check_target_liveness(&mut capture),
+        None,
+        "must not give up before the liveness timeout"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    assert_eq!(session.ping_active_target(&mut capture).await, None);
+    assert_eq!(
+        session.check_target_liveness(&mut capture),
+        Some(target.device_id),
+        "a connected-but-silent target must be given up on"
+    );
+    assert_eq!(session.ownership_state(), OwnershipState::Local);
+    assert_eq!(
+        capture.suppression_calls,
+        vec![true, false],
+        "local input must be un-suppressed"
+    );
+}
+
+/// The other side of the same rule: a target running the real
+/// `run_target` loop answers every ping, so forwarding continues well past
+/// the liveness timeout.
+#[tokio::test]
+async fn a_responsive_target_answers_pings_and_forwarding_continues() {
+    let hub = Device::new([0x73; 32]);
+    let target = Device::new([0x74; 32]);
+    let (hub_peer, mut target_peer) = connect_pair(&hub, &target).await;
+
+    tokio::spawn(async move {
+        let mut geometry = FakeGeometry::new((0, 0));
+        let mut inject = FakeInject {
+            received: Arc::new(Mutex::new(Vec::new())),
+        };
+        let _ = run_target(&mut target_peer, &mut geometry, &mut inject).await;
+    });
+
+    let mut session = Session::new(
+        hub.device_id,
+        two_device_layout(hub.device_id, target.device_id),
+        (1000, 800),
+        (500, 400),
+    );
+    session.set_liveness_timeout(std::time::Duration::from_millis(500));
+    session.add_peer(target.device_id, hub_peer, (1000, 800));
+    let mut geometry = FakeGeometry::new((500, 400));
+    let mut capture = FakeCapture::default();
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut geometry,
+            &mut capture,
+        )
+        .await
+        .unwrap();
+
+    // ~900 ms in total -- well past the 500 ms timeout -- answering every ping.
+    for _ in 0..9 {
+        assert_eq!(session.ping_active_target(&mut capture).await, None);
+        let (from, result) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            session.recv_from_active_target(),
+        )
+        .await
+        .expect("a responsive target must answer a ping");
+        assert_eq!(from, target.device_id);
+        assert!(
+            matches!(
+                result,
+                Ok(Message::Control(kvm_protocol::ControlMessage::Pong { .. }))
+            ),
+            "expected a Pong, got {result:?}"
+        );
+        session.handle_target_control(from, result, &mut capture);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    assert_eq!(session.check_target_liveness(&mut capture), None);
+    assert!(matches!(
+        session.ownership_state(),
+        OwnershipState::Forwarding { .. }
+    ));
+    assert_eq!(capture.suppression_calls, vec![true]);
+}
+
+/// The emergency chord (ADR-0009 decision 19) end to end: with the target
+/// connected but unresponsive, Control+Option+Command+Escape on this side
+/// alone must un-suppress local input immediately -- no timeout, no help
+/// from the target.
+#[tokio::test]
+async fn the_emergency_chord_restores_local_input_with_the_target_unresponsive() {
+    let hub = Device::new([0x75; 32]);
+    let target = Device::new([0x76; 32]);
+    let (hub_peer, _target_peer_never_read) = connect_pair(&hub, &target).await;
+
+    let mut session = Session::new(
+        hub.device_id,
+        two_device_layout(hub.device_id, target.device_id),
+        (1000, 800),
+        (500, 400),
+    );
+    session.add_peer(target.device_id, hub_peer, (1000, 800));
+    let mut geometry = FakeGeometry::new((500, 400));
+    let mut capture = FakeCapture::default();
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut geometry,
+            &mut capture,
+        )
+        .await
+        .unwrap();
+    assert_eq!(capture.suppression_calls, vec![true]);
+
+    for key in [Key::ControlLeft, Key::AltLeft, Key::MetaLeft, Key::Escape] {
+        session
+            .handle_captured(
+                key_event(key, ButtonState::Pressed),
+                &mut geometry,
+                &mut capture,
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(session.ownership_state(), OwnershipState::Local);
+    assert_eq!(capture.suppression_calls, vec![true, false]);
+}

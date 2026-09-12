@@ -249,17 +249,63 @@ mod real {
         //    real disconnect, independent of whether the user can
         //    interact with anything at all.
         let mut watchdog = tokio::time::interval(std::time::Duration::from_millis(300));
+        // Optional cursor screenshots (ADR-0009 decision 19): set
+        // KVM_CURSOR_SHOTS=<dir> and, while forwarding, a screenshot that
+        // includes the cursor *as actually drawn* is saved every tick,
+        // named by the same `t=` milliseconds as the sensor log line.
+        // Needs Screen Recording permission for the terminal.
+        let started = std::time::Instant::now();
+        let shots_dir = std::env::var_os("KVM_CURSOR_SHOTS").map(std::path::PathBuf::from);
+        if let Some(dir) = &shots_dir {
+            std::fs::create_dir_all(dir).expect("create KVM_CURSOR_SHOTS directory");
+            println!(
+                "saving cursor screenshots while forwarding to {}",
+                dir.display()
+            );
+        }
+        let mut screenshot: Option<std::process::Child> = None;
         loop {
             tokio::select! {
                 _ = watchdog.tick() => {
-                    if let Some(pos) = (!matches!(session.ownership_state(), OwnershipState::Local))
-                        .then(|| geometry.cursor_position().ok())
-                        .flatten()
-                    {
+                    if !matches!(session.ownership_state(), OwnershipState::Local) {
+                        // Cursor diagnostics (ADR-0009 decision 19): two
+                        // independent readings, plus an optional screenshot
+                        // that includes the cursor as actually drawn.
+                        let ms = started.elapsed().as_millis();
                         println!(
-                            "ground-truth check: real OS cursor position while {:?} is {pos:?}",
-                            session.ownership_state()
+                            "cursor sensors t={ms}ms while {:?}: event-api={:?} window-server={:?}",
+                            session.ownership_state(),
+                            geometry.cursor_position().ok(),
+                            window_server_cursor(),
                         );
+                        if let Some(dir) = &shots_dir {
+                            let busy = screenshot
+                                .as_mut()
+                                .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+                            if !busy {
+                                screenshot = std::process::Command::new("screencapture")
+                                    .args(["-x", "-C", "-t", "png"])
+                                    .arg(dir.join(format!("{ms}.png")))
+                                    .spawn()
+                                    .ok();
+                            }
+                        }
+                    }
+                    // Liveness (ADR-0009 decision 19): a target can stay
+                    // connected while no longer processing input.
+                    let unresponsive = match session.ping_active_target(&mut capture).await {
+                        Some(target) => Some(target),
+                        None => session.check_target_liveness(&mut capture),
+                    };
+                    if let Some(target) = unresponsive {
+                        println!(
+                            "watchdog: {target:?} stopped answering -- connected but no longer \
+                             processing input; dropped it and gave local input back"
+                        );
+                        if let Ok(pos) = geometry.cursor_position() {
+                            session.resync_local_position(pos.0, pos.1);
+                        }
+                        last_state = session.ownership_state();
                     }
                     if let Some(target) = session.active_target_connection_closed() {
                         println!(
@@ -286,7 +332,7 @@ mod real {
                         eprintln!("session error: {e}");
                     }
                     let state = session.ownership_state();
-                    if state != last_state {
+                    if !same_owner(state, last_state) {
                         println!("ownership changed: {last_state:?} -> {state:?}");
                         if state == OwnershipState::Local
                             && let Ok(pos) = geometry.cursor_position()
@@ -302,6 +348,18 @@ mod real {
                         // moves specifically — deliberately not logged, to
                         // avoid the excessive per-event noise the kickoff
                         // warns against.
+                    }
+                }
+                (from, result) = session.recv_from_active_target() => {
+                    session.handle_target_control(from, result, &mut capture);
+                    if session.ownership_state() == OwnershipState::Local
+                        && !same_owner(last_state, OwnershipState::Local)
+                    {
+                        println!("{from:?}'s control stream failed -- local input restored");
+                        if let Ok(pos) = geometry.cursor_position() {
+                            session.resync_local_position(pos.0, pos.1);
+                        }
+                        last_state = session.ownership_state();
                     }
                 }
                 incoming = endpoint.accept() => {
@@ -337,6 +395,51 @@ mod real {
                 }
             }
         }
+    }
+
+    /// Whether two states have the same *owner*. Plain `==` also compares
+    /// `Forwarding`'s live `virtual_cursor` (ADR-0009 decision 15), which
+    /// changes on every mouse move -- comparing that way printed an
+    /// "ownership changed" line for every single move.
+    fn same_owner(a: OwnershipState, b: OwnershipState) -> bool {
+        match (a, b) {
+            (OwnershipState::Local, OwnershipState::Local) => true,
+            (
+                OwnershipState::Forwarding { target: x, .. },
+                OwnershipState::Forwarding { target: y, .. },
+            ) => x == y,
+            _ => false,
+        }
+    }
+
+    /// Diagnostic only (ADR-0009 decision 19): the WindowServer's own
+    /// record of where the cursor is, via the private
+    /// `CGSGetCurrentCursorLocation`. Logged beside the public event-API
+    /// reading because real hardware has twice shown that reading frozen
+    /// while a person watching the screen saw the cursor move. Example
+    /// code only -- never linked into the shipped library.
+    #[cfg(target_os = "macos")]
+    fn window_server_cursor() -> Option<(f64, f64)> {
+        #[repr(C)]
+        struct CgPoint {
+            x: f64,
+            y: f64,
+        }
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGSMainConnectionID() -> i32;
+            fn CGSGetCurrentCursorLocation(connection: i32, out: *mut CgPoint) -> i32;
+        }
+        let mut point = CgPoint { x: 0.0, y: 0.0 };
+        // SAFETY: `CGSMainConnectionID` takes no arguments; `point` is a
+        // valid, writable `CGPoint`-layout value that the call fills in.
+        let err = unsafe { CGSGetCurrentCursorLocation(CGSMainConnectionID(), &mut point) };
+        (err == 0).then_some((point.x, point.y))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn window_server_cursor() -> Option<(f64, f64)> {
+        None
     }
 
     async fn run_join(hub_addr: SocketAddr) {

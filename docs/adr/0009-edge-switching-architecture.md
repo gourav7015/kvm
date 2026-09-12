@@ -1045,3 +1045,80 @@ The stage-1 trace now also logs `raw_dx`/`raw_dy` and `re_anchored`, so
 the retest shows each correction directly.
 
 **Open**: real Mac->Windows hardware acceptance of the full round trip.
+
+### 19. A target can be connected but dead: emergency return chord, ping-based liveness, and drawn-cursor diagnostics
+
+**Update (2026-09-12):** the Mac->Windows acceptance run of `c605a80`
+confirmed the keyboard fix and exposed a safety gap.
+
+**What happened, from the hub log.** Forwarding from 11:23:00; seven
+left clicks forwarded at 11:23:21–25 (the user clicking into the Windows
+relay's own PowerShell window); Windows then stopped acting on input
+while the connection stayed up. The hub kept forwarding successfully —
+every second of the log shows `capture = router = sent`, the watchdog
+kept ticking every 300 ms, and forwarded Ctrl+C presses at 11:25:22–24
+went nowhere — with its own input suppressed the whole time. Recovery
+came only at 11:25:26, when the user killed the Windows terminal with
+the Windows mouse, the connection closed, and the watchdog restored local
+input. The hub was never blocked; it simply had no way to tell a
+connected-but-dead target from a healthy one. The closed-connection
+watchdog (decision 12) and QUIC's 10 s idle timeout both only ever catch
+connections that are actually gone, and QUIC's keep-alives run on their
+own threads, so a target whose input loop is stuck still looks alive.
+
+**Likely trigger (not yet confirmed on Windows).** A click in a Windows
+console starts a QuickEdit selection, which pauses any write to that
+console; the target's input loop writes a log line per injected move.
+A confirmation test (cancel the selection with Esc and see injection
+resume) is pending. The two fixes below do not depend on the cause.
+
+**A. Emergency return chord.** Control + Option/Alt + Command/Meta +
+Escape (either side of each modifier) returns to `Local` immediately
+while `Forwarding`, via the already-present
+`OwnershipEvent::ReturnToLocal`. It is decided purely from this device's
+own captured input, so it works however the target has failed; held
+keys are released on the target being left; the Escape itself is never
+forwarded. `Router::is_emergency_return_chord` /
+`emergency_return_to_local`.
+
+**B. Ping-based liveness.** While `Forwarding`, the hub pings the active
+target on the control stream (using `ControlMessage::Ping`/`Pong`, which
+have existed since protocol 1.0 — no protocol change). `run_target`
+answers from the same loop that injects input, so answers stop exactly
+when injection stops. If the active target hasn't answered for
+`TARGET_LIVENESS_TIMEOUT` (2 s; rationale on the constant), the hub
+drops it — closing the connection, so input already queued for it is
+discarded rather than replayed if it ever recovers — and local input
+comes back via `remove_peer`. Monitoring is armed when a peer becomes
+the active target. Reading the pongs relies on `MessageStream::recv`
+being cancel-safe (partial frames persist in its own buffer), so it sits
+in the relay's `select!` beside captured input. A target built before
+this change answers a `Ping` with a protocol-violation error and closes
+the connection, which the hub already handles as a disconnect.
+
+**C. Drawn-cursor diagnostics.** The user reports the Mac cursor
+visibly moving while forwarding. The public event-API reading the relay
+logs showed it frozen (480 readings, two values) — the same
+measurement-versus-observer contradiction decision 11 recorded. That
+reading is therefore not treated as ground truth. The relay now logs,
+every tick while forwarding, the event-API reading beside the
+WindowServer's own `CGSGetCurrentCursorLocation` (private API, example
+code only), and with `KVM_CURSOR_SHOTS=<dir>` saves a screenshot that
+includes the cursor as actually drawn. Any fix to cursor suppression
+waits for that evidence; the two reverted re-warp attempts (decisions 11
+and 13) are not revisited.
+
+Also: the relay compared `OwnershipState` with `==`, which since
+decision 15 includes the live `virtual_cursor`, so it printed "ownership
+changed" on every mouse move; it now compares owners only.
+
+Tests: router unit tests for the chord (returns to `Local`, releases
+held modifiers on the target, never forwards the Escape, either-side
+modifiers, incomplete chord and plain Escape forwarded normally, no-op
+while `Local`); real-loopback session tests for a connected-but-silent
+target being given up on only after the timeout with suppression
+lifted, a `run_target` target answering pings well past the timeout,
+and the chord restoring local input with the target unresponsive.
+
+**Open**: the drawn-cursor measurement, the Windows QuickEdit
+confirmation, and real Mac->Windows acceptance.

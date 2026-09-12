@@ -26,10 +26,17 @@ const CORE_DEVICES: u8 = 0;
 const DEFAULT_ROOT: u32 = x11rb::NONE;
 /// `time` value meaning "let the server fill in the current time".
 const CURRENT_TIME: u32 = 0;
-/// `detail` value for `MotionNotify` meaning the coordinates are a
-/// relative offset from the pointer's current position, not an
-/// absolute screen position.
-const MOTION_RELATIVE: u8 = 1;
+/// Where a relative move of `(dx, dy)` from `current` lands, as the
+/// absolute root coordinates `XTestFakeInput` takes. See the `MouseMove`
+/// arm of [`X11Inject::inject`] for why moves are placed absolutely.
+fn absolute_motion_target(current: (i32, i32), dx: i32, dy: i32) -> (i16, i16) {
+    let clamp = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    (
+        clamp(current.0.saturating_add(dx)),
+        clamp(current.1.saturating_add(dy)),
+    )
+}
+
 /// `detail` value for `MotionNotify` meaning the coordinates are an
 /// absolute position in the root window's coordinate space — the
 /// other branch of the same request, used for [`PointerGeometry::set_cursor_position`].
@@ -119,9 +126,34 @@ impl Inject for X11Inject {
                 self.fake_input(KEY_RELEASE_EVENT, keycode, 0, 0)
             }
             InputMessage::MouseMove { dx, dy } => {
-                let root_x = dx.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-                let root_y = dy.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-                self.fake_input(MOTION_NOTIFY_EVENT, MOTION_RELATIVE, root_x, root_y)
+                // Placed absolutely -- read the pointer, add the delta --
+                // not as XTEST *relative* motion, which the X server runs
+                // through pointer acceleration. The sender's `Router`
+                // tracks this screen's cursor with 1:1 deltas, so an
+                // accelerated move drifts away from where it thinks the
+                // cursor is: the same failure the Windows injector had
+                // with relative `SendInput` (ADR-0009, fixed there with
+                // `GetCursorPos`+`SetCursorPos`). ADR-0009 decision 24.
+                let before = self.cursor_position()?;
+                let (target_x, target_y) = absolute_motion_target(before, dx, dy);
+                let result =
+                    self.fake_input(MOTION_NOTIFY_EVENT, MOTION_ABSOLUTE, target_x, target_y);
+                // Diagnostic readback, same shape as the Windows injector's
+                // stage 4: a disagreement away from a real screen edge
+                // would be direct evidence of target-side rescaling.
+                let actual = self.cursor_position().ok();
+                let intended = (i32::from(target_x), i32::from(target_y));
+                tracing::info!(
+                    stage = "4-x11-inject",
+                    ?before,
+                    dx,
+                    dy,
+                    ?intended,
+                    ?actual,
+                    matched = actual == Some(intended),
+                    "X11Inject: relative move applied via QueryPointer+absolute XTEST motion"
+                );
+                result
             }
             InputMessage::MouseButton { button, state } => {
                 let detail = match button {
@@ -221,5 +253,29 @@ impl X11Inject {
         self.conn
             .flush()
             .map_err(|e| InputError::InjectFailed(format!("failed to flush injected event: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_move_lands_at_the_current_position_plus_the_delta() {
+        assert_eq!(absolute_motion_target((100, 100), 5, -3), (105, 97));
+        assert_eq!(absolute_motion_target((0, 0), -4, -4), (-4, -4));
+    }
+
+    #[test]
+    fn a_move_never_overflows_the_protocols_coordinate_range() {
+        assert_eq!(
+            absolute_motion_target((i32::from(i16::MAX), 0), 10, 0),
+            (i16::MAX, 0)
+        );
+        assert_eq!(
+            absolute_motion_target((i32::MAX, 0), i32::MAX, 0),
+            (i16::MAX, 0)
+        );
+        assert_eq!(absolute_motion_target((0, i32::MIN), 0, -5), (0, i16::MIN));
     }
 }

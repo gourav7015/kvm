@@ -1333,3 +1333,73 @@ the first crossing once landing 63 px off-proportion — the latter the
 same stale-position mechanism as decision 21, which re-anchors after a
 return but not at session start). The architecture is unchanged by the
 acceptance itself.
+
+### 24. Linux (X11) edge switching, in both roles
+
+**Update (2026-09-13):** Phase 4 was accepted for Mac -> Windows; this
+brings the X11 backend to the same point in both roles, without
+changing `Router`, `Session`, the protocol or any Windows code.
+
+**Linux as the target (Mac/Windows -> Linux).** `X11Inject` injected
+motion as XTEST *relative* motion, which the X server passes through
+pointer acceleration — the same defect class the Windows injector had
+with relative `SendInput`: the sender's `Router` tracks the target's
+cursor with 1:1 deltas, so accelerated moves drift away from it, and the
+screen's far edges become unreachable or edge crossings land wrong.
+It now reads the pointer (`QueryPointer`) and places it at current +
+delta with absolute XTEST motion — the Windows fix's shape. Each move
+logs `stage="4-x11-inject"` with before/intended/actual, matching the
+Windows injector's diagnostic, so the first hardware run verifies it.
+
+**Linux as the hub (Linux -> Mac/Windows).** Decision 9 left X11
+capture listen-only. Now:
+
+- **Local suppression.** Raw XI2 events can't be discarded one by one,
+  so the capture thread takes `XGrabKeyboard` and `XGrabPointer` on the
+  root window for exactly the duration of `Forwarding` — the exclusive
+  grabs ADR-0008 decision 1 ruled out for an *always-on* session, held
+  here only while this screen shouldn't act on its own input anyway. The
+  pointer grab uses a fully transparent cursor, so this screen's arrow
+  disappears too (decision 20's equivalent). `set_local_suppression`
+  reaches the capture thread as a `ClientMessage` command on its own
+  window (the existing stop mechanism, extended: word 0 still means
+  stop). A grab can fail while another client holds one (e.g. a button
+  still down mid-drag); the thread retries on later input until both
+  are held. Grabs are released on return, on stop, and — by the X
+  server — if this process dies. Raw events keep arriving while
+  grabbed, so forwarding, the emergency chord and liveness recovery are
+  unaffected.
+- **Own warps ignored.** The hub's own cursor warps (`RecenterLocal`,
+  `LandLocal`) go through XTEST and come back as raw events from the X
+  server's XTEST devices; raw events whose `sourceid` is an XTEST device
+  are ignored (decision 18's failure class; macOS uses
+  `SYNTHETIC_EVENT_MARKER`). Other XTEST users (e.g. `xdotool`) are
+  ignored too.
+- **Caps Lock state** for the new-target sync (ADR-0007): the Lock
+  modifier from `QueryPointer`.
+- **Diagnostics.** With debug logging, each captured move logs
+  `stage="1-capture"` with the pointer's real position beside the
+  delta, so any drift between `Router`'s tracked position and the real
+  one is measurable.
+
+**Deliberately not done, and why.** `last_pointer_location` (decision
+21) is not implemented for X11: that fix exists because macOS's position
+query returns a stale point after disassociation, and X11 never
+disassociates — the pointer keeps moving (hidden) under the grab, so
+the query stays truthful. Trackpad-gesture suppression (decision 23) is
+not needed separately: the pointer grab keeps pointer input, gestures
+included, from other clients.
+
+**Limits.** The capture delta is XI2's processed `axisvalues`; whether
+that equals on-screen pointer motion on a given driver is exactly what
+the stage-1 log checks. Absolute devices (tablets, touchscreens, some
+virtual machines) are out of scope, as before. If the relay hangs (not
+dies) while grabbed, the X server keeps the grab; a VT switch
+(Ctrl+Alt+F-key) still reaches the server to stop the process.
+
+**Tests:** capture command encoding (word 0 is stop), XTEST device
+recognition, grab-state logic, absolute move targets with clamping.
+Linux-only code, so run on Linux; type-checked and linted here with
+`--target x86_64-unknown-linux-gnu`.
+
+**Open**: real hardware, both roles, on the Ubuntu 24.04 X11 machine.

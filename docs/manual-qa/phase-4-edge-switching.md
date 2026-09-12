@@ -107,9 +107,21 @@ detail).
 
 ## 2. Mac (hub) ↔ Linux/X11 (join)
 
+Linux code for both roles is complete as of ADR-0009 decision 24. Run
+on the Ubuntu 24.04 machine **in an X11 session** (at the login screen,
+pick "Ubuntu on Xorg"; `echo $XDG_SESSION_TYPE` must print `x11`):
+
+```
+git pull origin main
+RUST_LOG=kvm_core=debug,kvm_input=info cargo run -p kvm-core --example edge_switch_relay -- join <mac-lan-ip>:51823 2>&1 | tee ~/kvm-accept-linux-join.log
+```
+
+Check the `stage="4-x11-inject"` lines: `matched=true` away from the
+screen edges confirms moves land exactly where the Mac expects.
+
 | Check | Result |
 |---|---|
-| Same checks as section 1, repeated against the Linux machine | ⏭ NOT TESTED — no Linux machine available (follow-up F4) |
+| Same checks as section 1, repeated against the Linux machine | ⏭ NOT TESTED yet — code complete (decision 24) |
 
 ## 3. Windows (hub) ↔ Mac (join)
 
@@ -119,9 +131,24 @@ detail).
 
 ## 4. Linux/X11 (hub) ↔ Mac (join)
 
+Linux hub (X11 session, as above):
+
+```
+RUST_LOG=kvm_core=debug,kvm_input=debug cargo run -p kvm-core --example edge_switch_relay -- hub --edge right 2>&1 | tee ~/kvm-accept-linux-hub.log
+```
+
+Mac join: `cargo run -p kvm-core --example edge_switch_relay -- join <linux-lan-ip>:51823`.
+While forwarding, the hub logs `local input grabbed`, its own arrow
+disappears and its apps receive no input; on return it logs `local
+input grabs released`. If the Linux screen is ever stuck grabbed:
+**Control+Option(Alt)+Command(Super)+Esc** on the Linux keyboard, or
+stop the relay (the X server drops the grab when the process exits).
+
 | Check | Result |
 |---|---|
-| Same checks as section 1, with roles reversed | ⏭ NOT TESTED — no Linux machine available (follow-up F4) |
+| Same checks as section 1, with roles reversed | ⏭ NOT TESTED yet — code complete (decision 24) |
+| While forwarding, the Linux screen's own apps receive no keyboard/mouse input and its arrow is hidden | ⏭ NOT TESTED yet |
+| The hub's own cursor warps never register as motion (no bounce-back on switching) | ⏭ NOT TESTED yet |
 
 ## 5. Disconnected / unresponsive target
 

@@ -235,3 +235,11 @@ phase made to any pre-existing Phase 1–3 code.
   regardless of the owning process's privilege level. This is a
   property of X11 the manual QA doc should note as expected behavior,
   not something Phase 3b needed to prove.
+
+## Update (2026-09-13): temporary grabs while forwarding
+
+Decision 1's rule that capture never grabs still holds for the ordinary,
+listen-only case. Phase 4 adds one bounded exception: while this machine
+forwards its input to another device, the capture thread holds the
+keyboard and pointer grabs so this screen stops acting on that input,
+releasing them on return — see ADR-0009 decision 24.

@@ -1,6 +1,9 @@
 # Phase 4 — pointer-range root-cause experiment (A vs B)
 
-**Status: awaiting a real-hardware run. No production fix has been made yet.**
+**Status: resolved (2026-09-12).** Hypothesis A confirmed; fixed in
+`ca59d93`, with the follow-on regression fixed in `35c8495`
+(ADR-0009 decisions 17 and 18); verified on real hardware — see
+Results below and `phase-4-edge-switching.md`.
 
 This document defines the one experiment that decides the open Phase 4
 blocker: the Windows cursor cannot reach the right/top/bottom edges and
@@ -158,4 +161,27 @@ the evidence names.
 
 ## Results
 
-_(to be filled in from the real-hardware run)_
+**Experiment 1 (Mac, `mac_pointer_probe --suppress`), 2026-09-12 —
+Hypothesis A confirmed.** The run was stopped with Ctrl+C before the
+`=== SUMMARY ===` / `--- VERDICT ---` blocks printed, so the per-event
+CSV is the record: once the pointer was pushed past the right edge,
+`CGEvent::location()` x stayed pinned at **1470.0** — the Mac's 1470×956
+point display boundary — while the event's own `kCGMouseEventDeltaX`
+kept reporting real motion (e.g. 102, 44, 89, 75 on consecutive
+events). A location-difference delta therefore reads 0 at the boundary,
+and the router's virtual cursor stopped advancing: the "boxed into the
+middle" symptom. Those exact values are pinned by the regression test
+`motion_is_still_reported_when_the_pointer_is_clamped_at_the_screen_edge`.
+
+**Fix.** `ca59d93` reads motion from the delta fields instead of the
+location (ADR-0009 decision 17). Its first hardware run bounced every
+switch straight back: the one real event after the hub's own recentre
+warp carries the warp's displacement in its delta fields. `35c8495`
+measures that one event from where the warp landed (decision 18).
+
+**Hardware verification (`35c8495` onward).** The Windows cursor reached
+all four corners of its 1366×768 screen (left x=5, top y=11, bottom
+y=767); 7 of 7 switches showed exactly one re-anchored correction each
+(e.g. raw dx −722 → dx 12). Experiment 2 was not needed separately:
+the stage-tagged trace was used throughout the rest of the acceptance
+run.

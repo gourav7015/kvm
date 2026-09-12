@@ -251,12 +251,14 @@ channels. Platform-specific code is confined to backend modules inside
   only ever accept one connection, and — the latest, ADR-0009 decision
   9 — local input not being suppressed while `Forwarding`, now fixed
   for macOS and Windows (X11 still carries the older listen-only
-  behavior, tracked for Round B). **Phase 4 is not closed until the
-  manual QA doc has real PASS evidence for every row** (Round A is
-  in progress; Round B/C, multi-device, and the full modifier-safety/
-  disconnected-target/rapid-switching matrix are still open), per this
-  project's standing rule that a phase's real-hardware DoD items are
-  never marked done from unit tests alone.
+  behavior, tracked for Round B). **Phase 4 closed 2026-09-12** on the
+  real Mac (hub) -> Windows (join) acceptance at `891a80c` (tag
+  `phase-4-done`), by the project owner's decision that this direction
+  is the Phase 4 acceptance. Rows that acceptance did not cover — the
+  Linux/X11 and Windows-as-hub directions, multi-device, and
+  reconnection without a hub restart on hardware — are recorded in the
+  manual QA doc as not tested and carried forward, never marked done
+  from unit tests alone.
 
 ### Manual QA record (all closed)
 
@@ -293,6 +295,26 @@ Mac→Windows translation until fixed.
 | Option↔Alt never translates | ✅ PASS, both directions |
 | End-to-end input latency measured and logged (`examples/input_relay.rs`) | ✅ PASS — network RTT 7.9–15.0ms, injection calls ~70–700µs typical (Mac CGEvent and Windows SendInput both), felt latency acceptable for interactive use |
 | Real shortcut combinations (Cmd+A/X/V on Mac → Ctrl+A/X/V on Windows) | ✅ PASS — confirmed on real hardware; each key's own independently-ordered press/release event is sufficient, no "concurrent modifiers" field needed |
+
+### Manual QA record — Phase 4 (real Mac→Windows run 2026-09-12)
+
+Full detail, configuration and run history:
+`docs/manual-qa/phase-4-edge-switching.md`. Hub: MacBook Air
+(`Mac16,12`), macOS 26.6.2, 1470×956 points. Join: Lenovo laptop,
+Windows 10 build 10.0.19045.6466, 1366×768 at 96 DPI. Accepted at
+`891a80c`.
+
+| Item | Status |
+|---|---|
+| Edge switching Mac→Windows and back, at the real edges | ✅ PASS |
+| Windows cursor reaches the whole screen (all four corners) | ✅ PASS |
+| Proportional crossing between different resolutions | ✅ PASS (3 of 4 exact in the final run; first-crossing anomaly recorded as a follow-up) |
+| Mac cursor hidden and still while forwarding; lands at the edge on return | ✅ PASS (one first-switch miss recorded as a follow-up) |
+| Keyboard: letters, digits, punctuation, number pad, Caps Lock, Num Lock | ✅ PASS |
+| Two-finger scroll speed; three-finger gestures kept off the Mac | ✅ PASS |
+| Emergency return chord; stalled-target liveness recovery; disconnect fallback | ✅ PASS |
+| Reconnect without hub restart | ⏭ not verified on hardware (automated only) |
+| Linux/X11 and Windows-as-hub directions | ⏭ not tested |
 
 See `/Users/gourav/.claude/plans/elegant-wishing-origami.md` for the full
 phase breakdown, per-phase Definition of Done, risk register, and QA matrix.

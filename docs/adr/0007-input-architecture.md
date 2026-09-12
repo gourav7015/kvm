@@ -145,8 +145,10 @@ Insert/End/Down/PgDn/Left/Clear/Right/Home/Up/PgUp/Delete when off, the
 standard keypad layout) and remembers the VK pressed for each held
 number-pad key so its release always matches. Operator keys and numpad
 Enter are unaffected. Whether an injected Num Lock actually toggles
-Windows' state is logged (`toggle_before`/`toggle_after`) and still to
-be confirmed on hardware.
+Windows' state is logged (`toggle_before`/`toggle_after`). *Confirmed
+on hardware 2026-09-12 (`e18265a`): Num Lock switches the Windows number
+pad between digits and navigation, and Caps Lock matches between the
+machines.*
 
 *Third follow-up, same day — scroll unit.* Caps Lock, Num Lock and the
 gesture fix passed on hardware; two-finger scrolling on Windows was far

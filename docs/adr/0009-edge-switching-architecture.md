@@ -642,8 +642,9 @@ from a different thread — needs to read it to seed `anchor`.
 
 **Not independently unit-testable**, same category as every other
 real-OS-interaction fix in this ADR — verified by real-hardware retest,
-which this decision does not yet have. Phase 4 remains open until it
-does.
+which this decision did not yet have when written. *(Resolved: the
+real Mac->Windows acceptance passed on 2026-09-12 — see "Phase 4
+acceptance" at the end of this ADR.)*
 
 **Update (2026-09-12): reverted. This class of fix is abandoned, not
 just this implementation.** The real-hardware retest of this decision
@@ -973,7 +974,8 @@ every one. Companions cover the vertical clamp, drag events, a
 genuinely stationary pointer (the fix must not manufacture motion), and
 a synthetic warp not disturbing the next real event's delta.
 
-**Open**: real Mac->Windows hardware acceptance of the full round trip.
+**Resolved (2026-09-12)**: real Mac->Windows hardware acceptance of the
+full round trip passed — see "Phase 4 acceptance" at the end of this ADR.
 
 ### 18. Acceptance run found a regression in decision 17: the first real event after our own warp carries the warp in its delta fields
 
@@ -1044,7 +1046,8 @@ very assumption the hardware disproved, and is replaced.
 The stage-1 trace now also logs `raw_dx`/`raw_dy` and `re_anchored`, so
 the retest shows each correction directly.
 
-**Open**: real Mac->Windows hardware acceptance of the full round trip.
+**Resolved (2026-09-12)**: real Mac->Windows hardware acceptance of the
+full round trip passed — see "Phase 4 acceptance" at the end of this ADR.
 
 ### 19. A target can be connected but dead: emergency return chord, ping-based liveness, and drawn-cursor diagnostics
 
@@ -1066,11 +1069,12 @@ watchdog (decision 12) and QUIC's 10 s idle timeout both only ever catch
 connections that are actually gone, and QUIC's keep-alives run on their
 own threads, so a target whose input loop is stuck still looks alive.
 
-**Likely trigger (not yet confirmed on Windows).** A click in a Windows
+**Likely trigger (confirmed on Windows in decision 20).** A click in a Windows
 console starts a QuickEdit selection, which pauses any write to that
 console; the target's input loop writes a log line per injected move.
 A confirmation test (cancel the selection with Esc and see injection
-resume) is pending. The two fixes below do not depend on the cause.
+resume) was pending when this was written — it later confirmed
+QuickEdit (decision 20). The two fixes below do not depend on the cause.
 
 **A. Emergency return chord.** Control + Option/Alt + Command/Meta +
 Escape (either side of each modifier) returns to `Local` immediately
@@ -1120,8 +1124,10 @@ target being given up on only after the timeout with suppression
 lifted, a `run_target` target answering pings well past the timeout,
 and the chord restoring local input with the target unresponsive.
 
-**Open**: the drawn-cursor measurement, the Windows QuickEdit
-confirmation, and real Mac->Windows acceptance.
+**Resolved (2026-09-12)**: the drawn cursor was handled by hiding it
+(decision 20), QuickEdit was confirmed (decision 20), the emergency
+chord and liveness check passed on hardware, and the real Mac->Windows
+acceptance passed.
 
 ### 20. The Mac cursor is hidden while forwarding; a released target never replays input it was dropped for
 
@@ -1175,9 +1181,10 @@ the reverted re-warp approaches (decisions 11 and 13) are not revisited.
 WindowServer calls, as in those tools; failure is logged and non-fatal
 (the cursor simply stays visible, the previous behaviour).
 
-**Open**: real Mac->Windows acceptance — the arrow invisible and still
-while forwarding and back on return, the emergency chord (not yet
-exercised on hardware), and the full round trip.
+**Resolved (2026-09-12)**: on hardware the arrow stays hidden while
+forwarding and returns on return, the emergency chord works, and the
+full round trip passed. One first-switch miss seen in the final run is
+recorded as follow-up F1 in `docs/manual-qa/phase-4-edge-switching.md`.
 
 ### 21. Re-anchor the local position on the first move after returning; three-finger gestures are not yet suppressed
 
@@ -1208,7 +1215,8 @@ protocol are untouched; backends without the method keep the previous
 behaviour. Regression test:
 `after_returning_home_the_first_real_move_re_anchors_the_local_position`.
 
-**Three-finger gestures — measured cause, fix pending measurement.**
+**Three-finger gestures — measured cause, fix pending measurement
+(since resolved: decision 23).**
 Ordinary trackpad movement no longer moves or shows the Mac cursor, but a
 three-finger swipe still acts on the Mac while forwarding. This Mac's
 settings are `TrackpadThreeFingerHorizSwipeGesture = 2` (switch Spaces)
@@ -1267,7 +1275,8 @@ no jumps), the WindowServer's cursor position never moved during 609
 readings while forwarding, and the cursor was hidden at every switch.
 The relay now also logs cursor visibility every tick while forwarding,
 so a gesture that re-shows the cursor is timestamped next time, and
-`mac_gesture_probe` (decision 21) is still to be run. No gesture fix
+`mac_gesture_probe` (decision 21) was still to be run at this point
+(it has been since — decision 23). No gesture fix
 until that evidence exists.
 
 ### 23. Trackpad gestures are dropped while forwarding
@@ -1302,4 +1311,25 @@ them — only kept from acting locally. The decision is a pure function,
 **Limit.** Only the two measured types are dropped. Other gesture types
 (e.g. rotate) were not produced in the measurement and are not touched.
 
-**Open**: real Mac->Windows acceptance of the gesture fix.
+**Resolved (2026-09-12)**: on hardware, three-finger swipes no longer
+open Mission Control or switch Spaces while forwarding, and still work
+on the Mac itself.
+
+## Phase 4 acceptance (2026-09-12)
+
+The real Mac (hub) -> Windows (join) acceptance passed at commit
+`891a80c`, on a MacBook Air (`Mac16,12`, macOS 26.6.2, 1470×956
+points) and a Lenovo laptop (Windows 10 build 10.0.19045.6466,
+1366×768 at 96 DPI). Every defect found along the way was traced to a
+pipeline stage with log evidence before being fixed — decisions 17–23
+here and ADR-0007's 2026-09-12 updates. Full evidence, configuration
+and run history: `docs/manual-qa/phase-4-edge-switching.md`.
+
+Not covered by this acceptance, and carried forward rather than claimed:
+the Linux/X11 and Windows-as-hub directions, reconnection without a hub
+restart on hardware (automated coverage only), and two first-switch
+anomalies seen in the final run's hub log (the cursor once not hiding;
+the first crossing once landing 63 px off-proportion — the latter the
+same stale-position mechanism as decision 21, which re-anchors after a
+return but not at session start). The architecture is unchanged by the
+acceptance itself.

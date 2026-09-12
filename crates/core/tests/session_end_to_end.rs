@@ -1389,3 +1389,92 @@ async fn the_emergency_chord_restores_local_input_with_the_target_unresponsive()
     assert_eq!(session.ownership_state(), OwnershipState::Local);
     assert_eq!(capture.suppression_calls, vec![true, false]);
 }
+
+/// Blocks inside its first `inject` until released -- stands in for the
+/// real-hardware target whose injection loop froze on a paused console
+/// write (ADR-0009 decision 20).
+struct FreezingInject {
+    received: Arc<Mutex<Vec<InputMessage>>>,
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+    frozen_once: bool,
+}
+
+impl Inject for FreezingInject {
+    fn inject(&mut self, event: &InputMessage) -> Result<(), InputError> {
+        self.received.lock().unwrap().push(event.clone());
+        if !self.frozen_once {
+            self.frozen_once = true;
+            let _ = self.entered.send(());
+            let _ = self.release.recv();
+        }
+        Ok(())
+    }
+}
+
+/// Regression test for the stale-input replay seen on real hardware
+/// (ADR-0009 decision 20): the target froze mid-injection, the hub gave up
+/// and dropped the connection, and when the target unfroze it injected
+/// moves it had already buffered locally. With the hub's connection gone,
+/// not one more event may be injected. (Without the guard this fails
+/// whenever the loop happens to poll the input stream before the control
+/// stream after release.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_target_frozen_mid_injection_never_replays_input_after_the_hub_dropped_it() {
+    let hub = Device::new([0x77; 32]);
+    let target = Device::new([0x78; 32]);
+    let (mut hub_peer, mut target_peer) = connect_pair(&hub, &target).await;
+    let target_connection = target_peer.connection.clone();
+
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let mut inject = FreezingInject {
+        received: received.clone(),
+        entered: entered_tx,
+        release: release_rx,
+        frozen_once: false,
+    };
+    let target_task = tokio::spawn(async move {
+        let mut geometry = FakeGeometry::new((0, 0));
+        run_target(&mut target_peer, &mut geometry, &mut inject).await
+    });
+
+    for _ in 0..20 {
+        hub_peer
+            .streams
+            .input
+            .send(&Message::Input(InputMessage::MouseMove { dx: 1, dy: 0 }))
+            .await
+            .unwrap();
+    }
+
+    // The target is now stuck inside its first injection.
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(std::time::Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .expect("the target never started injecting");
+
+    // The hub gives up on it, as `Session::check_target_liveness` does:
+    // dropping the peer closes the connection.
+    drop(hub_peer);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while target_connection.close_reason().is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the target never saw the connection close"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    release_tx.send(()).unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), target_task)
+        .await
+        .expect("the target loop must end once released");
+
+    assert_eq!(
+        received.lock().unwrap().len(),
+        1,
+        "only the event already mid-injection may land; the 19 still buffered must not be replayed"
+    );
+}

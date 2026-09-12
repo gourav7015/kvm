@@ -483,6 +483,7 @@ pub async fn run_target(
 ) -> Result<(), CoreError> {
     let control = &mut peer.streams.control;
     let input = &mut peer.streams.input;
+    let connection = &peer.connection;
     loop {
         tokio::select! {
             control_msg = control.recv() => {
@@ -521,6 +522,17 @@ pub async fn run_target(
             input_msg = input.recv() => {
                 match input_msg {
                     Ok(Message::Input(event)) => {
+                        // Never replay input the capturing device has
+                        // already given up on (ADR-0009 decision 20). Real
+                        // hardware: this loop froze for 24.6 s (a paused
+                        // console write); the hub dropped the connection
+                        // after 2 s; on release the loop injected 4 moves
+                        // still buffered locally, 0.33 ms apart, before
+                        // noticing. Once the connection is closed, nothing
+                        // more is injected.
+                        if connection.close_reason().is_some() {
+                            return Ok(());
+                        }
                         // Same reasoning: one failed injection (e.g. a
                         // transient SendInput rejection due to a focus
                         // change or UIPI restriction on Windows) must

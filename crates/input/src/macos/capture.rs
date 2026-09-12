@@ -8,7 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 
+use core_foundation::base::{CFTypeRef, TCFType};
+use core_foundation::boolean::CFBoolean;
 use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
+use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
@@ -31,6 +34,89 @@ use crate::traits::Capture;
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGEventTapEnable(tap: CGEventTapProxy, enable: bool);
+    // Cursor hiding for a background process -- see `set_cursor_hidden`
+    // and ADR-0009 decision 20. `CGSMainConnectionID` and
+    // `CGSSetConnectionProperty` are private WindowServer calls (the same
+    // ones Synergy/Barrier/Deskflow use for exactly this); `CGCursorIsVisible`
+    // is public but not wrapped by `core-graphics`.
+    fn CGSMainConnectionID() -> i32;
+    fn CGSSetConnectionProperty(
+        connection: i32,
+        target_connection: i32,
+        key: CFStringRef,
+        value: CFTypeRef,
+    ) -> i32;
+    fn CGCursorIsVisible() -> i32;
+}
+
+/// Hides (`true`) or shows (`false`) the cursor on behalf of this process,
+/// which is never the frontmost app (it runs from a terminal). See
+/// ADR-0009 decision 20 for why this exists and the measurements behind it.
+///
+/// Measured on real hardware (macOS 26.6.2): `CGDisplayHideCursor` from a
+/// background process has **no effect at all** (`CGCursorIsVisible` never
+/// drops to 0) unless the connection first sets the WindowServer property
+/// `SetsCursorInBackground`; with it set, hiding and showing both work,
+/// from the main thread and from a secondary thread alike. And if the
+/// process dies while the cursor is hidden — including a hard `abort()`
+/// with no cleanup — the WindowServer restores it on its own: a fresh
+/// process immediately sees it visible again. So a crash can never leave
+/// the user with an invisible cursor.
+///
+/// Every failure here is logged, never fatal: at worst the cursor stays
+/// visible, which is the pre-existing behaviour.
+fn set_cursor_hidden(hidden: bool) {
+    let display = CGDisplay::main();
+    let result = if hidden {
+        let key = CFString::from_static_string("SetsCursorInBackground");
+        // SAFETY: `CGSMainConnectionID` takes no arguments and returns this
+        // process's own WindowServer connection. `key` and the true
+        // `CFBoolean` are valid CF objects that outlive the call, which
+        // only reads them.
+        let err = unsafe {
+            CGSSetConnectionProperty(
+                CGSMainConnectionID(),
+                CGSMainConnectionID(),
+                key.as_concrete_TypeRef(),
+                CFBoolean::true_value().as_CFTypeRef(),
+            )
+        };
+        if err != 0 {
+            tracing::warn!(
+                err,
+                "setting SetsCursorInBackground failed -- the cursor may stay visible"
+            );
+        }
+        display.hide_cursor()
+    } else {
+        display.show_cursor()
+    };
+    if let Err(e) = result {
+        tracing::warn!(error = ?e, hidden, "changing cursor visibility failed");
+    }
+    // SAFETY: `CGCursorIsVisible` takes no arguments and only reads state.
+    let visible = unsafe { CGCursorIsVisible() } != 0;
+    if visible == hidden {
+        tracing::warn!(
+            hidden,
+            visible,
+            "cursor visibility did not change as requested"
+        );
+    } else {
+        tracing::info!(hidden, visible, "cursor visibility changed");
+    }
+}
+
+/// The cursor-visibility change a `set_local_suppression(suppress)` call
+/// must make, given whether this capture currently has the cursor hidden:
+/// `Some(hide?)`, or `None` for no change. Keeps every
+/// `CGDisplayHideCursor` matched by exactly one `CGDisplayShowCursor` —
+/// the WindowServer counts hides, so one unmatched hide would keep the
+/// cursor hidden even after a later show, and repeated calls with the same
+/// value (e.g. `Session::remove_peer` restoring an already-local state)
+/// must not hide or show twice.
+fn cursor_visibility_change(currently_hidden: bool, suppress: bool) -> Option<bool> {
+    (currently_hidden != suppress).then_some(suppress)
 }
 
 /// Global, low-level capture of this machine's keyboard and mouse via a
@@ -98,6 +184,13 @@ pub struct MacCapture {
     run_loop: Option<CFRunLoop>,
     thread: Option<thread::JoinHandle<()>>,
     suppress: Arc<AtomicBool>,
+    /// Whether this capture currently has the cursor hidden — see
+    /// `set_cursor_hidden` and ADR-0009 decision 20. Disassociation keeps
+    /// the WindowServer's cursor position frozen while forwarding, but real
+    /// hardware showed the user still seeing an arrow move; hiding the
+    /// cursor for the duration of a `Forwarding` session is what
+    /// established KVM tools do on macOS.
+    cursor_hidden: bool,
 }
 
 impl MacCapture {
@@ -323,11 +416,24 @@ impl Capture for MacCapture {
         // was still active.
         self.suppress.store(false, Ordering::Relaxed);
         let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
+        // Same reasoning: never leave the cursor hidden behind a stopped
+        // capture (the WindowServer also restores it if the process dies).
+        if let Some(hide) = cursor_visibility_change(self.cursor_hidden, false) {
+            set_cursor_hidden(hide);
+            self.cursor_hidden = hide;
+        }
     }
 
     fn set_local_suppression(&mut self, suppress: bool) {
         self.suppress.store(suppress, Ordering::Relaxed);
         tracing::info!(suppress, "set_local_suppression called");
+        // Hidden for exactly the duration of local suppression -- see
+        // ADR-0009 decision 20. Measured to work from any thread, so the
+        // caller's (async worker) thread is fine here.
+        if let Some(hide) = cursor_visibility_change(self.cursor_hidden, suppress) {
+            set_cursor_hidden(hide);
+            self.cursor_hidden = hide;
+        }
         // Best-effort immediate attempt, in addition to (not instead
         // of) the capture thread's own continuous reapplication on
         // every mouse-motion event -- see decision 14 (struct doc). If
@@ -345,5 +451,26 @@ impl Capture for MacCapture {
                  (non-fatal -- the capture thread reapplies this on the next motion event)"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suppression_hides_the_cursor_once_and_unsuppression_shows_it_once() {
+        assert_eq!(cursor_visibility_change(false, true), Some(true));
+        assert_eq!(cursor_visibility_change(true, false), Some(false));
+    }
+
+    /// A repeated call with the same value must never hide or show a
+    /// second time: the WindowServer counts hides, so an extra hide would
+    /// outlive the next show and leave the cursor invisible after
+    /// forwarding ends.
+    #[test]
+    fn repeating_the_same_suppression_state_changes_nothing() {
+        assert_eq!(cursor_visibility_change(true, true), None);
+        assert_eq!(cursor_visibility_change(false, false), None);
     }
 }

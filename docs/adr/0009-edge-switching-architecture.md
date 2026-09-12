@@ -1122,3 +1122,59 @@ and the chord restoring local input with the target unresponsive.
 
 **Open**: the drawn-cursor measurement, the Windows QuickEdit
 confirmation, and real Mac->Windows acceptance.
+
+### 20. The Mac cursor is hidden while forwarding; a released target never replays input it was dropped for
+
+**Update (2026-09-12):** the acceptance run of `0040eea` confirmed
+decision 19's liveness check on real hardware and settled two open
+questions.
+
+**Liveness confirmed; QuickEdit confirmed as the trigger.** A click into
+the Windows relay's PowerShell window was forwarded at 14:15:39.65. The
+Windows log shows injection stopping at 14:15:42.76, then a 24.57 s gap
+until the user released the console selection at 14:16:07; the hub gave
+up after `silent_for=2.09s` at 14:15:43.61 and restored local input by
+itself, 0.85 s after Windows froze. On release the Windows loop injected
+**4 moves 0.33 ms apart** (live input arrives ~8 ms apart) — frames
+already buffered locally — before noticing the closed connection and
+exiting. `run_target` now checks `connection.close_reason()` before every
+injection and stops once the connection is closed, so a released target
+injects nothing it was dropped for. Regression test:
+`a_target_frozen_mid_injection_never_replays_input_after_the_hub_dropped_it`.
+
+**The cursor: what the evidence shows.** The user again saw the Mac
+arrow move while forwarding. During that same session (87 readings over
+26 s of forwarding) both the public event-API position and the
+WindowServer's own `CGSGetCurrentCursorLocation` stayed at a single value
+each — frozen at the recentre point, not moving by a fraction of a pixel.
+No input leaked: of 2,353 motion events, every one during forwarding was
+dropped; the 31 passed through all came after local input was restored.
+Meanwhile the location carried *inside* each captured event traced the
+user's hand the whole time (e.g. pinned at x=1469 while pushing right,
+reaching the corner (1469, 0)), clamped to the display. So disassociation
+does freeze the WindowServer's position, yet a moving arrow is still
+visible; which internal position the display draws from has not been
+isolated, and doing so is not required for the fix below.
+
+**Fix: hide the cursor for the duration of local suppression**, as
+Synergy, Barrier and Deskflow do on macOS. Measured on this hardware
+before writing it: `CGDisplayHideCursor` from a background process (the
+relay runs from a terminal and is never frontmost) has no effect at all
+unless the connection first sets the WindowServer property
+`SetsCursorInBackground`; with it, hide and show both work from the main
+thread and from a secondary thread. If the process dies while the cursor
+is hidden — tested with a hard `abort()` and no cleanup — the
+WindowServer restores it immediately, so a crash cannot leave the cursor
+invisible. `MacCapture::set_local_suppression` hides on entering
+suppression and shows on leaving it, and `stop()` shows it; hides and
+shows are kept strictly paired (`cursor_visibility_change`), since the
+WindowServer counts hides. Disassociation and event dropping are
+unchanged. No warping, scaling, offsets, sleeps or timing constants;
+the reverted re-warp approaches (decisions 11 and 13) are not revisited.
+`SetsCursorInBackground` and `CGSMainConnectionID` are private
+WindowServer calls, as in those tools; failure is logged and non-fatal
+(the cursor simply stays visible, the previous behaviour).
+
+**Open**: real Mac->Windows acceptance — the arrow invisible and still
+while forwarding and back on return, the emergency chord (not yet
+exercised on hardware), and the full round trip.

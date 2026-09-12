@@ -94,7 +94,7 @@ detail).
 | Cursor appears on the Windows screen at the proportionally-correct position along the shared edge | ✅ PASS, with one exception — final run: 3 of 4 crossings within ±0.002 of the expected 768/956 = 0.803 ratio; the first crossing after the hub started landed 63 px low (follow-up F2) |
 | Mouse movement after the switch moves the Windows cursor across the **whole** screen | ✅ PASS — all four corners reached; 1,471 injected moves in a Windows log sample, 0 mismatched |
 | The Mac's own cursor stays hidden and still while forwarding | ✅ PASS — hidden at switch, shown on return; one first-switch miss in the final run (follow-up F1) |
-| Keyboard input lands on Windows, with Cmd/Ctrl translation still correct (per ADR-0007) | ✅ PASS — letters, digits, punctuation (`` ` - = [ ] \ ; ' , . / `` and shifted forms), number pad and numpad Enter, verified in Notepad |
+| Keyboard input lands on Windows, with modifier translation correct (accepted under the Phase 3 Cmd↔Ctrl rule; replaced 2026-09-13 by the positional rule — Option↔Windows key, Command↔Alt, Control unchanged — not yet re-verified, ADR-0007 decision 3) | ✅ PASS — letters, digits, punctuation (`` ` - = [ ] \ ; ' , . / `` and shifted forms), number pad and numpad Enter, verified in Notepad |
 | Caps Lock matches between the machines | ✅ PASS — synced as state (`e18265a`): capitals when on, lowercase when off, including after toggling it on the Mac first |
 | Num Lock switches the Windows number pad between digits and navigation | ✅ PASS (`e18265a`); the external keyboard's LED is driven by the Mac and never shows Windows' state — expected |
 | Two-finger scroll on Windows at a natural speed | ✅ PASS (`891a80c`) |

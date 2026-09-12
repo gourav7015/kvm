@@ -1,51 +1,42 @@
-//! Cross-platform modifier-role translation — the "killer feature": a
-//! shortcut pressed on one OS should feel native on whichever OS is
-//! receiving it. Pure, OS-independent, and the reason this file has no
-//! `#[cfg(target_os = ...)]` anywhere in it — see ADR-0007 §3.
+//! Cross-platform modifier mapping — pure, OS-independent, and the reason
+//! this file has no `#[cfg(target_os = ...)]` anywhere in it. See ADR-0007
+//! decision 3 and its 2026-09-13 update.
 //!
-//! The only asymmetry that exists between real desktop platforms is
-//! which key plays the *primary* shortcut-modifier role: Command on
-//! macOS, Control everywhere else (Windows and Linux both already agree
-//! with each other). So translation only does something when exactly one
-//! side of a (source, target) pair is macOS — it swaps Meta ↔ Control in
-//! that case, and is the identity function otherwise, including for
-//! every other key (letters, digits, function keys, navigation, Shift,
-//! Alt/Option, Caps Lock).
+//! **Positional, by the project owner's decision (2026-09-13):** a
+//! modifier key does the job of the key in the same physical spot on the
+//! other machine's keyboard. Left of the space bar, a Mac keyboard has
+//! control / option / command where a PC keyboard (Windows or Linux) has
+//! Ctrl / Windows / Alt — so between a Mac and a PC, **Option ↔ Windows
+//! key** and **Command ↔ Alt** swap, on each side of the keyboard, and
+//! **Control stays Control**. Every other key (letters, digits, function
+//! keys, navigation, Shift, Caps Lock) is unchanged, and Windows ↔ Linux
+//! is always the identity (their keyboards are the same).
+//!
+//! This replaced Phase 3's role-based mapping (Command ↔ Control), under
+//! which no Mac key could ever press the Windows key on the other side —
+//! real hardware: the Linux "Show Apps" overview (Windows key) could not
+//! be opened from the Mac at all. Consequence, by design: copying on a PC
+//! while controlling it from the Mac is Control+C; copying on the Mac from
+//! a PC keyboard is Alt+C (the Command spot).
 
 use kvm_protocol::{Key, PlatformKind};
 
 /// Translates `key`, as captured on `source`, into what should actually
 /// be injected on `target`.
 pub fn translate_for_target(key: Key, source: PlatformKind, target: PlatformKind) -> Key {
-    if source == target {
-        return key;
-    }
-
     let source_is_mac = source == PlatformKind::MacOs;
     let target_is_mac = target == PlatformKind::MacOs;
-
     if source_is_mac == target_is_mac {
-        // Neither side is macOS (Windows <-> Linux): both already treat
-        // Control as the primary modifier, nothing to translate.
+        // The same platform, or Windows <-> Linux: identical keyboards.
         return key;
     }
-
-    if source_is_mac {
-        // macOS -> Windows/Linux: Command becomes the primary modifier,
-        // Control.
-        match key {
-            Key::MetaLeft => Key::ControlLeft,
-            Key::MetaRight => Key::ControlRight,
-            other => other,
-        }
-    } else {
-        // Windows/Linux -> macOS: Control becomes the primary modifier,
-        // Command.
-        match key {
-            Key::ControlLeft => Key::MetaLeft,
-            Key::ControlRight => Key::MetaRight,
-            other => other,
-        }
+    // Exactly one side is a Mac: swap the keys that share a physical spot.
+    match key {
+        Key::AltLeft => Key::MetaLeft,
+        Key::MetaLeft => Key::AltLeft,
+        Key::AltRight => Key::MetaRight,
+        Key::MetaRight => Key::AltRight,
+        other => other,
     }
 }
 
@@ -77,6 +68,7 @@ mod tests {
         PlatformKind::Windows,
         PlatformKind::Linux,
     ];
+    const PCS: [PlatformKind; 2] = [PlatformKind::Windows, PlatformKind::Linux];
 
     #[test]
     fn same_platform_is_always_identity() {
@@ -105,80 +97,95 @@ mod tests {
         }
     }
 
+    /// Regression test for the real-hardware report that the Windows key
+    /// (Linux "Show Apps", the Windows Start menu) could not be pressed from
+    /// the Mac at all: Option — the Windows key's spot — now sends it.
     #[test]
-    fn mac_command_becomes_control_on_windows_and_linux() {
-        for target in [PlatformKind::Windows, PlatformKind::Linux] {
+    fn mac_option_becomes_the_windows_key_on_a_pc() {
+        for target in PCS {
+            assert_eq!(
+                translate_for_target(Key::AltLeft, PlatformKind::MacOs, target),
+                Key::MetaLeft
+            );
+            assert_eq!(
+                translate_for_target(Key::AltRight, PlatformKind::MacOs, target),
+                Key::MetaRight
+            );
+        }
+    }
+
+    #[test]
+    fn mac_command_becomes_alt_on_a_pc() {
+        for target in PCS {
             assert_eq!(
                 translate_for_target(Key::MetaLeft, PlatformKind::MacOs, target),
-                Key::ControlLeft
-            );
-            assert_eq!(
-                translate_for_target(Key::MetaRight, PlatformKind::MacOs, target),
-                Key::ControlRight
-            );
-        }
-    }
-
-    #[test]
-    fn windows_and_linux_control_becomes_command_on_mac() {
-        for source in [PlatformKind::Windows, PlatformKind::Linux] {
-            assert_eq!(
-                translate_for_target(Key::ControlLeft, source, PlatformKind::MacOs),
-                Key::MetaLeft
-            );
-            assert_eq!(
-                translate_for_target(Key::ControlRight, source, PlatformKind::MacOs),
-                Key::MetaRight
-            );
-        }
-    }
-
-    #[test]
-    fn mac_control_key_itself_is_not_remapped() {
-        // macOS's actual physical Control key is a distinct key from
-        // Command and must not also get swapped when translating outward
-        // — only Meta maps to Control, Control itself stays Control.
-        for target in [PlatformKind::Windows, PlatformKind::Linux] {
-            assert_eq!(
-                translate_for_target(Key::ControlLeft, PlatformKind::MacOs, target),
-                Key::ControlLeft
-            );
-            assert_eq!(
-                translate_for_target(Key::ControlRight, PlatformKind::MacOs, target),
-                Key::ControlRight
-            );
-        }
-    }
-
-    #[test]
-    fn windows_meta_key_itself_is_not_remapped_going_to_mac() {
-        // Symmetric case: the Windows key (Meta on a PC keyboard) is
-        // distinct from Control and must not also get swapped.
-        for source in [PlatformKind::Windows, PlatformKind::Linux] {
-            assert_eq!(
-                translate_for_target(Key::MetaLeft, source, PlatformKind::MacOs),
-                Key::MetaLeft
-            );
-            assert_eq!(
-                translate_for_target(Key::MetaRight, source, PlatformKind::MacOs),
-                Key::MetaRight
-            );
-        }
-    }
-
-    #[test]
-    fn option_alt_never_translates_either_direction() {
-        // Option (macOS) and Alt (Windows/Linux) already correspond in
-        // role as the *secondary* modifier — no swap needed either way.
-        for (source, target) in all_cross_platform_pairs() {
-            assert_eq!(
-                translate_for_target(Key::AltLeft, source, target),
                 Key::AltLeft
             );
             assert_eq!(
-                translate_for_target(Key::AltRight, source, target),
+                translate_for_target(Key::MetaRight, PlatformKind::MacOs, target),
                 Key::AltRight
             );
+        }
+    }
+
+    #[test]
+    fn a_pc_windows_key_becomes_option_on_the_mac() {
+        for source in PCS {
+            assert_eq!(
+                translate_for_target(Key::MetaLeft, source, PlatformKind::MacOs),
+                Key::AltLeft
+            );
+            assert_eq!(
+                translate_for_target(Key::MetaRight, source, PlatformKind::MacOs),
+                Key::AltRight
+            );
+        }
+    }
+
+    /// Also the real-hardware Dock report: the PC's Windows key used to
+    /// arrive as Command, so Windows key + click was a Command+click
+    /// ("Show in Finder"). Now Alt is the key in the Command spot.
+    #[test]
+    fn a_pc_alt_becomes_command_on_the_mac() {
+        for source in PCS {
+            assert_eq!(
+                translate_for_target(Key::AltLeft, source, PlatformKind::MacOs),
+                Key::MetaLeft
+            );
+            assert_eq!(
+                translate_for_target(Key::AltRight, source, PlatformKind::MacOs),
+                Key::MetaRight
+            );
+        }
+    }
+
+    #[test]
+    fn control_is_control_everywhere() {
+        for (source, target) in all_cross_platform_pairs() {
+            assert_eq!(
+                translate_for_target(Key::ControlLeft, source, target),
+                Key::ControlLeft
+            );
+            assert_eq!(
+                translate_for_target(Key::ControlRight, source, target),
+                Key::ControlRight
+            );
+        }
+    }
+
+    /// A key pressed on one machine and handed back unchanged by the other
+    /// is the key that was pressed: the mapping is its own inverse.
+    #[test]
+    fn translating_there_and_back_is_identity() {
+        for (source, target) in all_cross_platform_pairs() {
+            for key in all_test_keys() {
+                let there = translate_for_target(key, source, target);
+                assert_eq!(
+                    translate_for_target(there, target, source),
+                    key,
+                    "{key:?} {source:?}->{target:?}->{source:?}"
+                );
+            }
         }
     }
 
@@ -240,6 +247,8 @@ mod tests {
                 Key::Delete,
                 Key::Tab,
                 Key::Space,
+                Key::NumLock,
+                Key::Numpad7,
             ] {
                 assert_eq!(translate_for_target(key, source, target), key);
             }
@@ -272,7 +281,7 @@ mod tests {
             0x47, // Mac keypad Clear -> Windows typed G (named NumLock since 1.2;
                   // as a *raw* code it must still never be injected)
         ] {
-            for target in [PlatformKind::Windows, PlatformKind::Linux] {
+            for target in PCS {
                 assert!(
                     !is_injectable(Key::Unknown(code), PlatformKind::MacOs, target),
                     "raw macOS code {code:#x} must never be injected on {target:?}"

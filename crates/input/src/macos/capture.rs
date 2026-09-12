@@ -143,6 +143,17 @@ fn cursor_visibility_change(currently_hidden: bool, suppress: bool) -> Option<bo
 /// main tap cannot even register for them; `install_gesture_tap` does.
 const GESTURE_EVENT_TYPES: [u32; 2] = [29, 30];
 
+/// `NX_SYSDEFINED` (14): the event macOS sends for the top-row media keys
+/// (brightness, volume, playback) instead of a key press when "Use F1, F2,
+/// etc. keys as standard function keys" is off — the default. Real
+/// hardware: in every hub log no F1–F12 was ever captured, while the keys
+/// still acted on the Mac while forwarding (ADR-0007's 2026-09-13 update).
+/// `CGEventType` has no variant for it either, so it rides the same tap as
+/// the gestures and is dropped under the same rule. (With that setting on,
+/// or with fn held, the keys arrive as ordinary F1–F12 presses and are
+/// forwarded.)
+const SYSTEM_DEFINED_EVENT_TYPE: u32 = 14;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GestureTapAction {
     Keep,
@@ -161,7 +172,9 @@ fn gesture_tap_action(event_type: u32, suppressed: bool) -> GestureTapAction {
     {
         return GestureTapAction::ReEnable;
     }
-    if suppressed && GESTURE_EVENT_TYPES.contains(&event_type) {
+    let local_only =
+        GESTURE_EVENT_TYPES.contains(&event_type) || event_type == SYSTEM_DEFINED_EVENT_TYPE;
+    if suppressed && local_only {
         GestureTapAction::Drop
     } else {
         GestureTapAction::Keep
@@ -235,6 +248,7 @@ fn install_gesture_tap(run_loop: &CFRunLoop, suppress: Arc<AtomicBool>) -> Optio
     }));
     let mask = GESTURE_EVENT_TYPES
         .iter()
+        .chain(std::iter::once(&SYSTEM_DEFINED_EVENT_TYPE))
         .fold(0u64, |mask, &event_type| mask | (1u64 << event_type));
     // SAFETY: plain FFI with valid arguments -- the same location,
     // placement and options as the main tap, a mask of two event types, a
@@ -276,8 +290,9 @@ fn install_gesture_tap(run_loop: &CFRunLoop, suppress: Arc<AtomicBool>) -> Optio
     run_loop.add_source(&source, unsafe { kCFRunLoopDefaultMode });
     tap._source = Some(source);
     tracing::info!(
-        types = ?GESTURE_EVENT_TYPES,
-        "gesture tap installed -- trackpad gestures are dropped while forwarding"
+        gesture_types = ?GESTURE_EVENT_TYPES,
+        system_defined_type = SYSTEM_DEFINED_EVENT_TYPE,
+        "gesture tap installed -- trackpad gestures and top-row media keys are dropped while forwarding"
     );
     Some(tap)
 }
@@ -689,13 +704,27 @@ mod tests {
         }
     }
 
+    /// Regression test for the top-row media keys acting on the Mac while
+    /// forwarding (real hardware, ADR-0007's 2026-09-13 update).
+    #[test]
+    fn media_key_events_are_dropped_only_while_suppressed() {
+        assert_eq!(
+            gesture_tap_action(SYSTEM_DEFINED_EVENT_TYPE, true),
+            GestureTapAction::Drop
+        );
+        assert_eq!(
+            gesture_tap_action(SYSTEM_DEFINED_EVENT_TYPE, false),
+            GestureTapAction::Keep
+        );
+    }
+
     #[test]
     fn the_gesture_tap_never_drops_anything_else() {
         for event_type in [
             CGEventType::MouseMoved as u32,
             CGEventType::KeyDown as u32,
+            CGEventType::FlagsChanged as u32,
             CGEventType::ScrollWheel as u32,
-            14,
         ] {
             assert_eq!(gesture_tap_action(event_type, true), GestureTapAction::Keep);
         }

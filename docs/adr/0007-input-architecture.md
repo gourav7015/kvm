@@ -170,6 +170,25 @@ notches and carry the remainder into the next event, so fine deltas add
 up to the full distance. No wire format change. The X11 and macOS-target
 scroll paths are unverified on hardware.
 
+*Update (2026-09-13), from the first Mac <-> Linux run.* **Linux number
+pad**: the Mac sent Num Lock (10 presses) and number-pad keys, yet on
+Linux "Num Lock did nothing". The X11 `KeyMap` named each keycode by its
+column-0 keysym, and on the standard XKB keypad that is the Num-Lock-off
+symbol (`[KP_Home, KP_7]`), so `Numpad0`–`9` and `NumpadDecimal` had no
+keycode and were refused, while Num Lock itself — injected and toggled —
+had no visible effect. `key_for_keysyms` now names a keycode by the
+first keysym this crate can name; the X server then applies its own Num
+Lock to the pressed keypad keycode, like real hardware. **Top-row keys
+leaking into the Mac**: across every hub log, Windows and Linux runs
+alike, no F1–F12 was ever captured, while the keys still acted on the
+Mac. With macOS's default "Use F1, F2, etc. keys as standard function
+keys" off, the top row sends `NX_SYSDEFINED` (type 14) media events, not
+key presses; the macOS capture's gesture tap now also drops type 14
+while forwarding. The owner chose to have F1–F12 sent: with that macOS
+setting on (or fn held) the keys arrive as ordinary F1–F12 presses,
+which are already mapped and forwarded. Media actions are not forwarded.
+Modifier mapping: see decision 3's 2026-09-13 update.
+
 Known, documented limits of this change: keys that remain unnamed
 (macOS keypad Clear and keypad `=`, the ISO `§` key, F13+, media keys)
 are now refused cross-platform — logged, not typed as some unrelated
@@ -265,6 +284,26 @@ carries `source_os`, and the injecting device always knows its own OS via
 `cfg!(target_os = ...)`, no additional handshake/capability-exchange
 message is needed to make this work — deliberately avoiding scope creep
 into protocol negotiation machinery for Phase 3.
+
+**Update (2026-09-13) — the mapping is now positional, by the project
+owner's decision.** Where translation happens (the injecting side, from
+`source_os`) is unchanged; *what* it maps is not. The Phase 3 rule
+swapped Command ↔ Control, so Cmd+C copied everywhere — but no Mac key
+could ever reach the Windows key on a PC: real hardware (Mac -> Linux),
+the GNOME "Show Apps" overview could not be opened from the Mac, and in
+the other direction the PC's Windows key arrived as Command, so Windows
+key + click on a Dock icon was a Command+click ("Show in Finder"). The
+owner chose a positional layout, for Windows and Linux alike: left of
+the space bar a Mac has control / option / command where a PC has Ctrl
+/ Windows / Alt, so between a Mac and a PC **Option ↔ Windows key** and
+**Command ↔ Alt** swap on each side, and **Control stays Control**
+(`translate_for_target`; the mapping is its own inverse, pinned by
+`translating_there_and_back_is_identity`). By design, copying on a PC
+while controlling it from the Mac is now Control+C, and copying on the
+Mac from a PC keyboard is Alt+C. This supersedes the Phase 3 QA rows
+"Command → Control", "Control → Command" and "Option↔Alt never
+translates", which recorded the old rule; the new mapping is not yet
+re-verified on hardware.
 
 ### 4. macOS: `CGEventTap` (capture) + `CGEvent::post` (inject), permission checked via `AXIsProcessTrusted`
 

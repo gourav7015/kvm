@@ -264,20 +264,16 @@ async fn peer_key_events_are_translated_for_this_builds_platform() {
     let mut peer_a = connect_task.await.unwrap().unwrap();
     let peer_b = accept_task.await.unwrap().unwrap();
 
-    // `translate_for_target` only swaps Control<->Meta, and only the
-    // *primary-shortcut-modifier* direction: Windows/Linux's Control
-    // becomes macOS's Command when the target is macOS; macOS's Command
-    // becomes Windows/Linux's Control otherwise. A raw Meta (Windows
-    // key) sent *to* macOS is deliberately left alone — there's no
-    // macOS equivalent slot for it — so the (source, sent key, expected
-    // key) triple has to match the real direction being exercised, not
-    // just "some non-local source".
+    // `translate_for_target` is positional (ADR-0007's 2026-09-13
+    // update): between a Mac and a PC, Option <-> Windows key and
+    // Command <-> Alt swap; Control is unchanged. So the (source, sent
+    // key, expected key) triple must be a key that actually changes in
+    // the direction this build exercises: a PC's Alt arrives on a Mac as
+    // Command; a Mac's Command arrives on a PC as Alt.
     #[cfg(target_os = "macos")]
-    let (source_os, sent_key, expected_key) =
-        (PlatformKind::Windows, Key::ControlLeft, Key::MetaLeft);
+    let (source_os, sent_key, expected_key) = (PlatformKind::Windows, Key::AltLeft, Key::MetaLeft);
     #[cfg(not(target_os = "macos"))]
-    let (source_os, sent_key, expected_key) =
-        (PlatformKind::MacOs, Key::MetaLeft, Key::ControlLeft);
+    let (source_os, sent_key, expected_key) = (PlatformKind::MacOs, Key::MetaLeft, Key::AltLeft);
 
     let sent = InputMessage::Key {
         key: sent_key,

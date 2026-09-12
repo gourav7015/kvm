@@ -1178,3 +1178,49 @@ WindowServer calls, as in those tools; failure is logged and non-fatal
 **Open**: real Mac->Windows acceptance — the arrow invisible and still
 while forwarding and back on return, the emergency chord (not yet
 exercised on hardware), and the full round trip.
+
+### 21. Re-anchor the local position on the first move after returning; three-finger gestures are not yet suppressed
+
+**Update (2026-09-12):** the acceptance run of `dfdcf03` confirmed the
+cursor hiding for ordinary trackpad and mouse use, the emergency chord,
+and the round trip, and exposed two further issues.
+
+**Early switching — measured, fixed.** The user saw control sometimes
+move to Windows before the Mac cursor reached the right edge. At every
+Local -> Forwarding switch in the log, the router's tracked x was at the
+edge; at several, the real cursor (the location carried by the event)
+was far short of it: router 1473 vs real 909, 1466 vs 1039, 1487 vs
+899. The cause is the position the relay re-anchors on after returning
+home: **all 21 returns** read the recentre point (735, 478) from the OS
+position query, while the first real event after each was elsewhere —
+(106, 435), (107, 569), (1417, 384)… The OS query still reports where the
+cursor was frozen while forwarding; the cursor itself carries on from
+where the hand moved it. The offset then persisted for the whole next
+local stretch.
+
+Fix: `Capture` gains `last_pointer_location()` (default `None`), which
+`MacCapture` fills from each pointer event's own location, recorded on
+the tap thread before the event is handed on. `Session` sets
+`reanchor_pending` on every return to `Local` and, on the next captured
+move, re-anchors the router on that location (one delta back, since the
+router then adds the move's own delta). Router, ownership and the
+protocol are untouched; backends without the method keep the previous
+behaviour. Regression test:
+`after_returning_home_the_first_real_move_re_anchors_the_local_position`.
+
+**Three-finger gestures — measured cause, fix pending measurement.**
+Ordinary trackpad movement no longer moves or shows the Mac cursor, but a
+three-finger swipe still acts on the Mac while forwarding. This Mac's
+settings are `TrackpadThreeFingerHorizSwipeGesture = 2` (switch Spaces)
+and `TrackpadThreeFingerVertSwipeGesture = 2` (Mission Control), with
+three-finger drag off; `MacCapture`'s tap registers only keyboard, mouse
+and scroll event types, so gesture events are never seen or dropped.
+Tapping them needs event types `core-graphics` cannot represent, and
+whether dropping them at the HID tap actually stops the system gesture
+is not established. `crates/input/examples/mac_gesture_probe.rs`
+measures which event types a swipe produces, at which tap location, and
+— with `--drop-gestures` — whether dropping them stops the gesture. The
+production fix waits for that result.
+
+Also in this change (ADR-0007's 2026-09-12 update): Caps Lock and Num
+Lock now reach the target.

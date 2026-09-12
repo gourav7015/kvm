@@ -168,6 +168,12 @@ pub enum Key {
     NumpadSubtract,
     NumpadDivide,
     NumpadEnter,
+
+    // ---- Added in protocol 1.2 (appended, same reasoning as above) ----
+    /// The PC Num Lock key. The same physical key as the Mac keypad's
+    /// Clear key: USB HID usage 0x53 is literally "Keypad Num Lock and
+    /// Clear".
+    NumLock,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -346,6 +352,8 @@ mod tests {
         assert_eq!(index(Key::Slash), 82);
         assert_eq!(index(Key::Numpad0), 83);
         assert_eq!(index(Key::NumpadEnter), 98);
+        // Protocol 1.2.
+        assert_eq!(index(Key::NumLock), 99);
     }
 
     #[test]

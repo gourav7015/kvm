@@ -269,7 +269,8 @@ mod tests {
             0x2C, // Mac /        -> Windows pressed Print Screen
             0x32, // Mac `        -> Windows typed 2
             0x4C, // Mac keypad Enter -> Windows typed L
-            0x47, // Mac keypad Clear -> Windows typed G (still unnamed today)
+            0x47, // Mac keypad Clear -> Windows typed G (named NumLock since 1.2;
+                  // as a *raw* code it must still never be injected)
         ] {
             for target in [PlatformKind::Windows, PlatformKind::Linux] {
                 assert!(

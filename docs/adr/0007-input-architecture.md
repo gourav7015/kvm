@@ -101,6 +101,23 @@ means something.
 This amends decision 1: a raw code is preserved on the wire as before,
 but is only ever injected on the platform that produced it.
 
+*Follow-up, same day — Caps Lock and Num Lock.* Both still did nothing
+on the target. **Caps Lock** was the gap the second update above left
+deliberately open: macOS reports it as a `FlagsChanged` toggle of the
+AlphaShift flag, not as a key going down and up, so it was never
+forwarded at all (the hardware log shows no `CapsLock` key sent in a
+whole session). Each toggle — on or off — is now forwarded as one
+complete tap, press then release (`modifier_transition` reports the
+press; `caps_lock_tap_release` completes it in the capture callback), so
+the target toggles its own Caps Lock to match. **Num Lock**: on a PC
+keyboard attached to the Mac, that key arrives as the keypad Clear key
+(`kVK_ANSI_KeypadClear`, seen in an earlier run's log as
+`Unknown(71)`); USB HID usage 0x53 is literally "Keypad Num Lock and
+Clear", so it is the same physical key. `Key::NumLock` is appended
+(protocol 1.2, wire index 99) and mapped on all three platforms; Windows
+injects it as an extended key, as Microsoft's own `keybd_event`
+documentation does.
+
 Known, documented limits of this change: keys that remain unnamed
 (macOS keypad Clear and keypad `=`, the ISO `§` key, F13+, media keys)
 are now refused cross-platform — logged, not typed as some unrelated

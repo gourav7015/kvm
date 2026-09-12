@@ -3,9 +3,9 @@
 //! OS event loop — no cross-platform translation logic lives here.
 
 use std::cell::Cell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use core_foundation::base::{CFTypeRef, TCFType};
@@ -19,7 +19,7 @@ use core_graphics::event::{
 };
 
 use crate::error::InputError;
-use crate::macos::events::to_input_message;
+use crate::macos::events::{caps_lock_tap_release, to_input_message};
 use crate::macos::permission::has_accessibility_permission;
 use crate::traits::Capture;
 
@@ -191,6 +191,11 @@ pub struct MacCapture {
     /// cursor for the duration of a `Forwarding` session is what
     /// established KVM tools do on macOS.
     cursor_hidden: bool,
+    /// The location carried by the most recent pointer event the tap
+    /// saw — see [`Capture::last_pointer_location`] and ADR-0009
+    /// decision 21. Written on the tap thread *before* the event is handed
+    /// on, so whoever handles that event reads it or something newer.
+    last_location: Arc<Mutex<Option<(i32, i32)>>>,
 }
 
 impl MacCapture {
@@ -211,6 +216,7 @@ impl Capture for MacCapture {
 
         let (setup_tx, setup_rx) = mpsc::channel::<Result<CFRunLoop, String>>();
         let suppress = Arc::clone(&self.suppress);
+        let last_location = Arc::clone(&self.last_location);
 
         let join_handle = thread::Builder::new()
             .name("kvm-input-macos-capture".to_string())
@@ -280,11 +286,32 @@ impl Capture for MacCapture {
                         let message = to_input_message(event_type, event, &mut flags, &mut anchor);
                         last_flags.set(flags);
                         post_warp_anchor.set(anchor);
+                        // Recorded before the event is handed on, so the
+                        // handler of this event sees this location or a
+                        // newer one -- see `last_pointer_location`.
+                        if matches!(
+                            event_type,
+                            CGEventType::MouseMoved
+                                | CGEventType::LeftMouseDragged
+                                | CGEventType::RightMouseDragged
+                                | CGEventType::OtherMouseDragged
+                        ) {
+                            let location = event.location();
+                            if let Ok(mut last) = last_location.lock() {
+                                *last = Some((location.x.round() as i32, location.y.round() as i32));
+                            }
+                        }
                         if let Some(message) = message {
+                            // A Caps Lock toggle becomes a full tap: its
+                            // press, then the matching release.
+                            let release = caps_lock_tap_release(event_type, &message);
                             // A full channel or a dropped receiver just
                             // means "no one is listening anymore" — not a
                             // capture failure worth surfacing per-event.
                             let _ = sink.send(message);
+                            if let Some(release) = release {
+                                let _ = sink.send(release);
+                            }
                         }
                         // Reported to the sink either way (so the
                         // forwarding target always gets it) -- only
@@ -422,6 +449,10 @@ impl Capture for MacCapture {
             set_cursor_hidden(hide);
             self.cursor_hidden = hide;
         }
+    }
+
+    fn last_pointer_location(&self) -> Option<(i32, i32)> {
+        self.last_location.lock().ok().and_then(|last| *last)
     }
 
     fn set_local_suppression(&mut self, suppress: bool) {

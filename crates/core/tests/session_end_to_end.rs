@@ -135,6 +135,9 @@ impl PointerGeometry for FakeGeometry {
 #[derive(Default)]
 struct FakeCapture {
     suppression_calls: Vec<bool>,
+    /// What `last_pointer_location` reports -- the real location carried
+    /// by the latest captured event (ADR-0009 decision 21).
+    location: Option<(i32, i32)>,
 }
 
 impl kvm_input::Capture for FakeCapture {
@@ -146,6 +149,10 @@ impl kvm_input::Capture for FakeCapture {
 
     fn set_local_suppression(&mut self, suppress: bool) {
         self.suppression_calls.push(suppress);
+    }
+
+    fn last_pointer_location(&self) -> Option<(i32, i32)> {
+        self.location
     }
 }
 
@@ -1477,4 +1484,84 @@ async fn a_target_frozen_mid_injection_never_replays_input_after_the_hub_dropped
         1,
         "only the event already mid-injection may land; the 19 still buffered must not be replayed"
     );
+}
+
+/// Regression test for the early edge switch seen on real hardware
+/// (ADR-0009 decision 21): after every return to `Local`, the OS position
+/// query still reported the point the cursor was frozen at while forwarding
+/// -- (735, 478) on all 21 returns -- while the cursor actually carried on
+/// from somewhere else (e.g. (106, 435)). Anchored on the stale point, the
+/// router later declared the right edge reached with the real cursor still
+/// hundreds of points short. The first real move must re-anchor it.
+#[tokio::test]
+async fn after_returning_home_the_first_real_move_re_anchors_the_local_position() {
+    let hub = Device::new([0x79; 32]);
+    let target = Device::new([0x7A; 32]);
+    let (hub_peer, _target_peer) = connect_pair(&hub, &target).await;
+
+    let mut layout = two_device_layout(hub.device_id, target.device_id);
+    layout
+        .set_neighbor(target.device_id, Edge::Left, hub.device_id)
+        .unwrap();
+    let mut session = Session::new(hub.device_id, layout, (1000, 800), (500, 400));
+    session.add_peer(target.device_id, hub_peer, (1000, 800));
+    let mut geometry = FakeGeometry::new((500, 400));
+    let mut capture = FakeCapture::default();
+
+    // Out to the target, then back home across its left edge.
+    for dx in [600, -1100] {
+        session
+            .handle_captured(
+                InputMessage::MouseMove { dx, dy: 0 },
+                &mut geometry,
+                &mut capture,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(session.ownership_state(), OwnershipState::Local);
+    // What the relay does on return, with the stale frozen reading.
+    session.resync_local_position(500, 400);
+
+    // The first real event after return: the pointer is really at x=105,
+    // having moved 5 points to get there.
+    capture.location = Some((105, 400));
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 5, dy: 0 },
+            &mut geometry,
+            &mut capture,
+        )
+        .await
+        .unwrap();
+
+    // 800 more points: real x = 905, still well short of the right edge.
+    // Anchored on the stale 500 it would be 1305 -- already switched.
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 800, dy: 0 },
+            &mut geometry,
+            &mut capture,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        session.ownership_state(),
+        OwnershipState::Local,
+        "must not switch while the real cursor is still 95 points from the edge"
+    );
+
+    // The last 95 points reach the real edge: now it switches.
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 95, dy: 0 },
+            &mut geometry,
+            &mut capture,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.ownership_state(),
+        OwnershipState::Forwarding { .. }
+    ));
 }

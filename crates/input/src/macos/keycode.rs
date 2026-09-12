@@ -114,6 +114,9 @@ pub fn keycode_to_key(code: u16) -> Key {
         0x4E => Key::NumpadSubtract,
         0x4B => Key::NumpadDivide,
         0x4C => Key::NumpadEnter,
+        // kVK_ANSI_KeypadClear: the key a PC keyboard labels Num Lock
+        // (USB HID usage 0x53, "Keypad Num Lock and Clear").
+        0x47 => Key::NumLock,
 
         other => Key::Unknown(other as u32),
     }
@@ -231,6 +234,7 @@ pub fn key_to_keycode(key: Key) -> Option<u16> {
         Key::NumpadSubtract => 0x4E,
         Key::NumpadDivide => 0x4B,
         Key::NumpadEnter => 0x4C,
+        Key::NumLock => 0x47,
 
         Key::Unknown(code) if code <= u16::MAX as u32 => code as u16,
         Key::Unknown(_) => return None,
@@ -341,6 +345,7 @@ mod tests {
         Key::NumpadSubtract,
         Key::NumpadDivide,
         Key::NumpadEnter,
+        Key::NumLock,
     ];
 
     /// **Regression test for the Phase 4 acceptance-run keyboard failure**
@@ -385,12 +390,10 @@ mod tests {
             );
         }
 
-        // Also in the log (x4; Windows typed G): keypad Clear, which sits
-        // where Num Lock does on a PC keypad but has no equivalent key
-        // there. Deliberately still `Unknown` -- and therefore refused by
-        // any non-macOS injector (see `translate::is_injectable`) rather
-        // than typing a letter.
-        assert_eq!(keycode_to_key(0x47), Key::Unknown(0x47));
+        // Also in the log (x4; Windows typed G): keypad Clear -- the key a
+        // PC keyboard labels Num Lock (USB HID usage 0x53, "Keypad Num
+        // Lock and Clear"). Named since protocol 1.2.
+        assert_eq!(keycode_to_key(0x47), Key::NumLock);
     }
 
     #[test]

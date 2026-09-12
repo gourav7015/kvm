@@ -8,12 +8,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_BACK, VK_C, VK_CAPITAL, VK_D, VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_E, VK_END,
     VK_ESCAPE, VK_F, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11,
     VK_F12, VK_G, VK_H, VK_HOME, VK_I, VK_J, VK_K, VK_L, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT,
-    VK_LWIN, VK_M, VK_MULTIPLY, VK_N, VK_NEXT, VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3,
-    VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, VK_O, VK_OEM_1,
-    VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS,
-    VK_OEM_PERIOD, VK_OEM_PLUS, VK_P, VK_PRIOR, VK_Q, VK_R, VK_RCONTROL, VK_RETURN, VK_RIGHT,
-    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_S, VK_SPACE, VK_SUBTRACT, VK_T, VK_TAB, VK_U, VK_UP, VK_V,
-    VK_W, VK_X, VK_Y, VK_Z,
+    VK_LWIN, VK_M, VK_MULTIPLY, VK_N, VK_NEXT, VK_NUMLOCK, VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2,
+    VK_NUMPAD3, VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, VK_O,
+    VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA,
+    VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_P, VK_PRIOR, VK_Q, VK_R, VK_RCONTROL, VK_RETURN,
+    VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_S, VK_SPACE, VK_SUBTRACT, VK_T, VK_TAB, VK_U, VK_UP,
+    VK_V, VK_W, VK_X, VK_Y, VK_Z,
 };
 
 /// Translates a raw Windows virtual-key code into a normalized [`Key`].
@@ -127,6 +127,7 @@ pub fn vk_to_key(vk: VIRTUAL_KEY) -> Key {
         VK_ADD => Key::NumpadAdd,
         VK_SUBTRACT => Key::NumpadSubtract,
         VK_DIVIDE => Key::NumpadDivide,
+        VK_NUMLOCK => Key::NumLock,
         // No arm for `Key::NumpadEnter`: Windows has no distinct VK for it
         // (it's `VK_RETURN` plus the extended-key flag), so a captured
         // numpad Enter reads back as `Key::Enter` here.
@@ -246,6 +247,7 @@ pub fn key_to_vk(key: Key) -> Option<VIRTUAL_KEY> {
         Key::NumpadDivide => VK_DIVIDE,
         // See `vk_to_key`: injected as a plain Return, which types Enter.
         Key::NumpadEnter => VK_RETURN,
+        Key::NumLock => VK_NUMLOCK,
 
         Key::Unknown(code) if code <= u16::MAX as u32 => VIRTUAL_KEY(code as u16),
         Key::Unknown(_) => return None,
@@ -355,10 +357,17 @@ mod tests {
         Key::NumpadAdd,
         Key::NumpadSubtract,
         Key::NumpadDivide,
+        Key::NumLock,
         // `Key::NumpadEnter` deliberately excluded: it injects as
         // `VK_RETURN`, which reads back as `Key::Enter` — see
         // `numpad_enter_injects_as_return`.
     ];
+
+    #[test]
+    fn num_lock_maps_to_vk_numlock() {
+        assert_eq!(key_to_vk(Key::NumLock), Some(VK_NUMLOCK));
+        assert_eq!(vk_to_key(VK_NUMLOCK), Key::NumLock);
+    }
 
     #[test]
     fn numpad_enter_injects_as_return() {

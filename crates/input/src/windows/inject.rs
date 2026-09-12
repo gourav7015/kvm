@@ -8,10 +8,10 @@ use kvm_protocol::{ButtonState, InputMessage, MouseButton, PlatformKind};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
-    SendInput,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput, VK_NUMLOCK,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos, XBUTTON1,
@@ -56,6 +56,21 @@ impl WindowsInject {
     }
 }
 
+/// `KEYEVENTF_*` flags for one injected key event. Num Lock is sent as an
+/// extended key: Microsoft's own `keybd_event` documentation toggles Num
+/// Lock exactly that way (`KEYEVENTF_EXTENDEDKEY`).
+fn key_flags(vk: u16, pressed: bool) -> KEYBD_EVENT_FLAGS {
+    let mut flags = if pressed {
+        KEYBD_EVENT_FLAGS(0)
+    } else {
+        KEYEVENTF_KEYUP
+    };
+    if vk == VK_NUMLOCK.0 {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    flags
+}
+
 fn keyboard_input(vk: u16, pressed: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
@@ -63,11 +78,7 @@ fn keyboard_input(vk: u16, pressed: bool) -> INPUT {
             ki: KEYBDINPUT {
                 wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(vk),
                 wScan: 0,
-                dwFlags: if pressed {
-                    Default::default()
-                } else {
-                    KEYEVENTF_KEYUP
-                },
+                dwFlags: key_flags(vk, pressed),
                 time: 0,
                 dwExtraInfo: 0,
             },
@@ -263,5 +274,25 @@ impl PointerGeometry for WindowsInject {
             "WindowsInject: set_cursor_position (handoff warp) applied"
         );
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn num_lock_is_sent_as_an_extended_key_both_ways() {
+        assert_eq!(key_flags(VK_NUMLOCK.0, true), KEYEVENTF_EXTENDEDKEY);
+        assert_eq!(
+            key_flags(VK_NUMLOCK.0, false),
+            KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY
+        );
+    }
+
+    #[test]
+    fn ordinary_keys_are_not_extended() {
+        assert_eq!(key_flags(0x41, true), KEYBD_EVENT_FLAGS(0)); // 'A'
+        assert_eq!(key_flags(0x41, false), KEYEVENTF_KEYUP);
     }
 }

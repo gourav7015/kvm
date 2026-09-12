@@ -19,7 +19,10 @@ pub const PROTOCOL_MAJOR: u8 = 1;
 ///   by `key_wire_indices_are_stable`). A 1.0 peer cannot decode those new
 ///   keys; everything else is unchanged in both directions. See ADR-0007's
 ///   2026-09-12 update.
-pub const PROTOCOL_MINOR: u8 = 1;
+/// - **1.2** — `Key::NumLock` appended (wire index 99). As with 1.1, a
+///   peer on an older minor version cannot decode that one key; nothing
+///   else changes.
+pub const PROTOCOL_MINOR: u8 = 2;
 
 /// Checks whether a peer-reported major version is compatible with ours.
 ///

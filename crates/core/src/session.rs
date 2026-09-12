@@ -54,6 +54,10 @@ pub struct Session {
     last_heard: HashMap<DeviceId, Instant>,
     liveness_timeout: Duration,
     next_ping_nonce: u64,
+    /// Set whenever ownership returns to `Local`; cleared by re-anchoring
+    /// the router's tracked position on the next captured move — see
+    /// ADR-0009 decision 21.
+    reanchor_pending: bool,
 }
 
 /// How long the active forwarding target may go without answering a
@@ -99,6 +103,7 @@ impl Session {
             last_heard: HashMap::new(),
             liveness_timeout: TARGET_LIVENESS_TIMEOUT,
             next_ping_nonce: 0,
+            reanchor_pending: false,
         }
     }
 
@@ -161,6 +166,7 @@ impl Session {
                 "active forwarding target disconnected, falling back to local input"
             );
             local_capture.set_local_suppression(false);
+            self.reanchor_pending = true;
         } else {
             tracing::info!(?device_id, "peer disconnected");
         }
@@ -343,6 +349,28 @@ impl Session {
         local_geometry: &mut dyn PointerGeometry,
         local_capture: &mut dyn Capture,
     ) -> Result<(), CoreError> {
+        // ADR-0009 decision 21: right after ownership returns to `Local`,
+        // the OS's own position query can still report where the cursor
+        // was frozen while forwarding (real hardware: every one of 21
+        // returns read the recentre point (735, 478) while the next real
+        // event was elsewhere, e.g. (106, 435)), and a router anchored
+        // there later switches hundreds of points early. The first real
+        // move's own location is the truth: re-anchor on it once. The
+        // router then adds this event's delta, so anchor one delta back.
+        if self.reanchor_pending
+            && let InputMessage::MouseMove { dx, dy } = event
+            && matches!(self.router.state(), OwnershipState::Local)
+        {
+            self.reanchor_pending = false;
+            if let Some((x, y)) = local_capture.last_pointer_location() {
+                tracing::debug!(
+                    x,
+                    y,
+                    "re-anchoring local position on the first move after return"
+                );
+                self.router.resync_position(x - dx, y - dy);
+            }
+        }
         let was_local = matches!(self.router.state(), OwnershipState::Local);
         let mut first_error = None;
         for effect in self.router.handle_captured(event) {
@@ -355,6 +383,7 @@ impl Session {
             local_capture.set_local_suppression(true);
         } else if !was_local && is_local {
             local_capture.set_local_suppression(false);
+            self.reanchor_pending = true;
         }
         match first_error {
             Some(e) => Err(e),

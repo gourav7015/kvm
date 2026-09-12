@@ -91,6 +91,8 @@ pub fn keysym_to_key(keysym: u32) -> Key {
         0xffaf => Key::NumpadDivide,   // XK_KP_Divide
         0xff8d => Key::NumpadEnter,    // XK_KP_Enter
 
+        0xff7f => Key::NumLock, // XK_Num_Lock
+
         other => Key::Unknown(other),
     }
 }
@@ -207,6 +209,7 @@ pub fn key_to_keysym(key: Key) -> u32 {
         Key::NumpadSubtract => 0xffad,
         Key::NumpadDivide => 0xffaf,
         Key::NumpadEnter => 0xff8d,
+        Key::NumLock => 0xff7f,
 
         Key::Unknown(code) => code,
     }
@@ -364,6 +367,7 @@ mod tests {
         Key::NumpadSubtract,
         Key::NumpadDivide,
         Key::NumpadEnter,
+        Key::NumLock,
     ];
 
     #[test]

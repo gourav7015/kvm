@@ -37,6 +37,16 @@ pub trait Capture: Send {
     /// every backend needs to implement this on the same day it's
     /// added elsewhere — see ADR-0009's per-platform rollout note.
     fn set_local_suppression(&mut self, _suppress: bool) {}
+
+    /// Where the most recently captured pointer event says the pointer
+    /// is, in this device's own screen coordinates — or `None` if the
+    /// backend doesn't record it. See ADR-0009 decision 21: on macOS this
+    /// is the only trustworthy position immediately after local
+    /// suppression ends, because the OS's own position query still returns
+    /// the point the cursor was frozen at while forwarding.
+    fn last_pointer_location(&self) -> Option<(i32, i32)> {
+        None
+    }
 }
 
 /// Injects a normalized [`InputMessage`] as local keyboard/mouse input.

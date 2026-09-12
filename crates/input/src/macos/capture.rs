@@ -3,23 +3,26 @@
 //! OS event loop — no cross-platform translation logic lives here.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use core_foundation::base::{CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
-use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
+use core_foundation::mach_port::{CFMachPort, CFMachPortInvalidate, CFMachPortRef};
+use core_foundation::runloop::{CFRunLoop, CFRunLoopSource, kCFRunLoopDefaultMode};
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
     CGEventTapProxy, CGEventType, CallbackResult,
 };
+use core_graphics::event_source::CGEventSourceStateID;
 
 use crate::error::InputError;
-use crate::macos::events::{caps_lock_tap_release, to_input_message};
+use crate::macos::events::to_input_message;
 use crate::macos::permission::has_accessibility_permission;
 use crate::traits::Capture;
 
@@ -47,6 +50,18 @@ unsafe extern "C" {
         value: CFTypeRef,
     ) -> i32;
     fn CGCursorIsVisible() -> i32;
+    // Public CoreGraphics calls `core-graphics` 0.25 doesn't wrap. The
+    // gesture tap needs `CGEventTapCreate` directly because its event
+    // types have no `CGEventType` variant (see `GESTURE_EVENT_TYPES`).
+    fn CGEventTapCreate(
+        tap: u32,
+        place: u32,
+        options: u32,
+        events_of_interest: u64,
+        callback: extern "C" fn(CGEventTapProxy, u32, *mut c_void, *mut c_void) -> *mut c_void,
+        user_info: *mut c_void,
+    ) -> CFMachPortRef;
+    fn CGEventSourceFlagsState(state_id: i32) -> u64;
 }
 
 /// Hides (`true`) or shows (`false`) the cursor on behalf of this process,
@@ -117,6 +132,154 @@ fn set_cursor_hidden(hidden: bool) {
 /// must not hide or show twice.
 fn cursor_visibility_change(currently_hidden: bool, suppress: bool) -> Option<bool> {
     (currently_hidden != suppress).then_some(suppress)
+}
+
+/// Raw event types a three-finger trackpad swipe produces, measured on
+/// real hardware by `examples/mac_gesture_probe.rs` (ADR-0009 decision
+/// 23): 29 and 30 (AppKit's `NSEventTypeGesture` and the type the probe
+/// labelled `Magnify`). Dropping them at the HID tap removed every one of
+/// them from the stream (776 and 55 at the session tap without dropping, 0
+/// with). `core-graphics`'s `CGEventType` has no variant for either, so the
+/// main tap cannot even register for them; `install_gesture_tap` does.
+const GESTURE_EVENT_TYPES: [u32; 2] = [29, 30];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GestureTapAction {
+    Keep,
+    Drop,
+    ReEnable,
+}
+
+/// Pure decision for one event reaching the gesture tap: gestures are
+/// dropped exactly while local input is suppressed (so this Mac's own
+/// Mission Control / Space switch never fires while forwarding, and
+/// gestures behave normally otherwise); the OS's tap-disabled
+/// notifications re-enable the tap, as for the main tap.
+fn gesture_tap_action(event_type: u32, suppressed: bool) -> GestureTapAction {
+    if event_type == CGEventType::TapDisabledByTimeout as u32
+        || event_type == CGEventType::TapDisabledByUserInput as u32
+    {
+        return GestureTapAction::ReEnable;
+    }
+    if suppressed && GESTURE_EVENT_TYPES.contains(&event_type) {
+        GestureTapAction::Drop
+    } else {
+        GestureTapAction::Keep
+    }
+}
+
+/// What the gesture tap's C callback reads: the same suppression flag the
+/// main tap uses, and the tap's own port, for re-enabling it.
+struct GestureTapContext {
+    suppress: Arc<AtomicBool>,
+    port: AtomicPtr<c_void>,
+}
+
+extern "C" fn gesture_tap_callback(
+    _proxy: CGEventTapProxy,
+    event_type: u32,
+    event: *mut c_void,
+    user_info: *mut c_void,
+) -> *mut c_void {
+    // SAFETY: `user_info` is the `GestureTapContext` this tap was created
+    // with (`install_gesture_tap`), freed only by `GestureTap::drop` after
+    // the tap's port is invalidated, so it can no longer call back.
+    let context = unsafe { &*(user_info as *const GestureTapContext) };
+    match gesture_tap_action(event_type, context.suppress.load(Ordering::Relaxed)) {
+        GestureTapAction::Keep => event,
+        GestureTapAction::Drop => {
+            tracing::debug!(event_type, "trackpad gesture dropped while forwarding");
+            std::ptr::null_mut()
+        }
+        GestureTapAction::ReEnable => {
+            tracing::warn!(
+                event_type,
+                "gesture tap was disabled by the OS -- re-enabling immediately"
+            );
+            let port = context.port.load(Ordering::Acquire);
+            if !port.is_null() {
+                // SAFETY: `port` is this tap's own live mach port (see above).
+                unsafe { CGEventTapEnable(port as CGEventTapProxy, true) };
+            }
+            event
+        }
+    }
+}
+
+/// The gesture tap, kept alive for one capture session and torn down on
+/// the capture thread once its run loop has returned.
+struct GestureTap {
+    port: CFMachPort,
+    _source: Option<CFRunLoopSource>,
+    context: *mut GestureTapContext,
+}
+
+impl Drop for GestureTap {
+    fn drop(&mut self) {
+        // SAFETY: `port` is a valid mach port we own; invalidating it stops
+        // any further callbacks before the context they read is freed.
+        unsafe { CFMachPortInvalidate(self.port.as_concrete_TypeRef()) };
+        // SAFETY: `context` came from `Box::into_raw` in
+        // `install_gesture_tap` and is freed only here, exactly once.
+        drop(unsafe { Box::from_raw(self.context) });
+    }
+}
+
+/// Adds a second HID-level tap, for `GESTURE_EVENT_TYPES` only, to
+/// `run_loop`. Failure is logged and non-fatal: capture works as before,
+/// only gestures keep acting on this Mac while forwarding.
+fn install_gesture_tap(run_loop: &CFRunLoop, suppress: Arc<AtomicBool>) -> Option<GestureTap> {
+    let context = Box::into_raw(Box::new(GestureTapContext {
+        suppress,
+        port: AtomicPtr::new(std::ptr::null_mut()),
+    }));
+    let mask = GESTURE_EVENT_TYPES
+        .iter()
+        .fold(0u64, |mask, &event_type| mask | (1u64 << event_type));
+    // SAFETY: plain FFI with valid arguments -- the same location,
+    // placement and options as the main tap, a mask of two event types, a
+    // callback with the documented `CGEventTapCallBack` signature, and a
+    // context pointer that outlives the tap (see `GestureTap::drop`).
+    let port_ref = unsafe {
+        CGEventTapCreate(
+            CGEventTapLocation::HID as u32,
+            CGEventTapPlacement::HeadInsertEventTap as u32,
+            CGEventTapOptions::Default as u32,
+            mask,
+            gesture_tap_callback,
+            context.cast(),
+        )
+    };
+    if port_ref.is_null() {
+        tracing::warn!(
+            "could not create the gesture tap -- trackpad gestures will still act on this \
+             Mac while forwarding"
+        );
+        // SAFETY: no tap was created, so nothing else holds `context`.
+        drop(unsafe { Box::from_raw(context) });
+        return None;
+    }
+    // SAFETY: `CGEventTapCreate` returns a port we own (Create rule), and
+    // `context` is valid until `GestureTap::drop`.
+    let port = unsafe { CFMachPort::wrap_under_create_rule(port_ref) };
+    unsafe { (*context).port.store(port_ref.cast(), Ordering::Release) };
+    let mut tap = GestureTap {
+        port,
+        _source: None,
+        context,
+    };
+    let Ok(source) = tap.port.create_runloop_source(0) else {
+        tracing::warn!("could not create the gesture tap's run loop source");
+        return None;
+    };
+    // SAFETY: `kCFRunLoopDefaultMode` is a static CF constant.
+    run_loop.add_source(&source, unsafe { kCFRunLoopDefaultMode });
+    tap._source = Some(source);
+    tracing::info!(
+        types = ?GESTURE_EVENT_TYPES,
+        "gesture tap installed -- trackpad gestures are dropped while forwarding"
+    );
+    Some(tap)
 }
 
 /// Global, low-level capture of this machine's keyboard and mouse via a
@@ -217,6 +380,7 @@ impl Capture for MacCapture {
         let (setup_tx, setup_rx) = mpsc::channel::<Result<CFRunLoop, String>>();
         let suppress = Arc::clone(&self.suppress);
         let last_location = Arc::clone(&self.last_location);
+        let gesture_suppress = Arc::clone(&self.suppress);
 
         let join_handle = thread::Builder::new()
             .name("kvm-input-macos-capture".to_string())
@@ -302,16 +466,10 @@ impl Capture for MacCapture {
                             }
                         }
                         if let Some(message) = message {
-                            // A Caps Lock toggle becomes a full tap: its
-                            // press, then the matching release.
-                            let release = caps_lock_tap_release(event_type, &message);
                             // A full channel or a dropped receiver just
                             // means "no one is listening anymore" — not a
                             // capture failure worth surfacing per-event.
                             let _ = sink.send(message);
-                            if let Some(release) = release {
-                                let _ = sink.send(release);
-                            }
                         }
                         // Reported to the sink either way (so the
                         // forwarding target always gets it) -- only
@@ -406,6 +564,10 @@ impl Capture for MacCapture {
                 // SAFETY: `kCFRunLoopDefaultMode` is a static CF constant
                 // provided by the framework; reading it is always sound.
                 run_loop.add_source(&source, unsafe { kCFRunLoopDefaultMode });
+                // ADR-0009 decision 23: trackpad gestures, dropped while
+                // forwarding. Torn down on this thread once the run loop
+                // returns (`GestureTap::drop`).
+                let gesture_tap = install_gesture_tap(&run_loop, gesture_suppress);
 
                 if setup_tx.send(Ok(run_loop)).is_err() {
                     // Caller already gave up waiting — nothing to run for.
@@ -413,6 +575,7 @@ impl Capture for MacCapture {
                 }
 
                 CFRunLoop::run_current();
+                drop(gesture_tap);
             })
             .map_err(|e| InputError::CaptureFailed(e.to_string()))?;
 
@@ -453,6 +616,13 @@ impl Capture for MacCapture {
 
     fn last_pointer_location(&self) -> Option<(i32, i32)> {
         self.last_location.lock().ok().and_then(|last| *last)
+    }
+
+    fn caps_lock_state(&self) -> Option<bool> {
+        // SAFETY: `CGEventSourceFlagsState` takes a plain state-ID value
+        // and returns plain flags; it only reads state.
+        let flags = unsafe { CGEventSourceFlagsState(CGEventSourceStateID::HIDSystemState as i32) };
+        Some(CGEventFlags::from_bits_truncate(flags).contains(CGEventFlags::CGEventFlagAlphaShift))
     }
 
     fn set_local_suppression(&mut self, suppress: bool) {
@@ -503,5 +673,45 @@ mod tests {
     fn repeating_the_same_suppression_state_changes_nothing() {
         assert_eq!(cursor_visibility_change(true, true), None);
         assert_eq!(cursor_visibility_change(false, false), None);
+    }
+
+    /// Regression test for trackpad gestures acting on the Mac while
+    /// forwarding (real hardware, ADR-0009 decision 23): the measured
+    /// gesture types are dropped exactly while suppressed.
+    #[test]
+    fn measured_gesture_types_are_dropped_only_while_suppressed() {
+        for event_type in GESTURE_EVENT_TYPES {
+            assert_eq!(gesture_tap_action(event_type, true), GestureTapAction::Drop);
+            assert_eq!(
+                gesture_tap_action(event_type, false),
+                GestureTapAction::Keep
+            );
+        }
+    }
+
+    #[test]
+    fn the_gesture_tap_never_drops_anything_else() {
+        for event_type in [
+            CGEventType::MouseMoved as u32,
+            CGEventType::KeyDown as u32,
+            CGEventType::ScrollWheel as u32,
+            14,
+        ] {
+            assert_eq!(gesture_tap_action(event_type, true), GestureTapAction::Keep);
+        }
+    }
+
+    #[test]
+    fn a_disabled_gesture_tap_is_re_enabled() {
+        for suppressed in [true, false] {
+            assert_eq!(
+                gesture_tap_action(CGEventType::TapDisabledByTimeout as u32, suppressed),
+                GestureTapAction::ReEnable
+            );
+            assert_eq!(
+                gesture_tap_action(CGEventType::TapDisabledByUserInput as u32, suppressed),
+                GestureTapAction::ReEnable
+            );
+        }
     }
 }

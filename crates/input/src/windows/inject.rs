@@ -2,9 +2,10 @@
 //! alongside [`crate::windows::capture`] — pure event-shape conversion,
 //! no cross-platform translation logic.
 
+use std::collections::HashMap;
 use std::mem::size_of;
 
-use kvm_protocol::{ButtonState, InputMessage, MouseButton, PlatformKind};
+use kvm_protocol::{ButtonState, InputMessage, Key, MouseButton, PlatformKind};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -21,13 +22,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::error::InputError;
 use crate::traits::{Inject, PointerGeometry};
 use crate::translate::is_injectable;
-use crate::windows::keycode::key_to_vk;
+use crate::windows::keycode::{key_to_vk, numpad_vk};
 
 /// Injects keyboard/mouse events on this machine via `SendInput`. No UAC
 /// elevation is requested — see ADR-0007 §5 for the resulting, documented
 /// limitation (this cannot inject into an elevated foreground window).
 #[derive(Default)]
-pub struct WindowsInject;
+pub struct WindowsInject {
+    /// The VK actually pressed for each number-pad key still held, so its
+    /// release is always the same VK even if Num Lock changed in between
+    /// (see [`numpad_vk`]) — otherwise a key could be left stuck down.
+    numpad_held: HashMap<Key, u16>,
+}
 
 impl WindowsInject {
     pub fn new() -> Self {
@@ -53,7 +59,7 @@ impl WindowsInject {
             scale_percent = (dpi as f64 / 96.0 * 100.0) as u32,
             "WindowsInject: system DPI at construction"
         );
-        Self
+        Self::default()
     }
 }
 
@@ -88,8 +94,9 @@ fn key_scan_code(vk: u16) -> u16 {
 }
 
 /// Whether Windows currently has `vk`'s toggle (Caps/Num Lock) on — the
-/// low bit of `GetKeyState`. Diagnostic only: logged around lock-key
-/// injections so a real-hardware run shows whether the toggle happened.
+/// low bit of `GetKeyState`. Decides Caps Lock syncing and which VK a
+/// number-pad key sends, and is logged around lock-key injections so a
+/// real-hardware run shows whether a toggle happened.
 fn toggle_state(vk: u16) -> bool {
     // SAFETY: `GetKeyState` takes a plain virtual-key code and returns a
     // plain integer; no pointers or buffers are involved.
@@ -158,23 +165,58 @@ impl Inject for WindowsInject {
                         "{key:?} is a raw {source_os:?} key code with no meaning on Windows -- not injected"
                     )));
                 }
-                let vk = key_to_vk(key).ok_or_else(|| {
-                    InputError::Unsupported(format!("{key:?} has no Windows VK code"))
-                })?;
-                let is_lock_key = vk == VK_NUMLOCK || vk == VK_CAPITAL;
-                let before = is_lock_key.then(|| toggle_state(vk.0));
-                let result = send(keyboard_input(vk.0, state == ButtonState::Pressed));
+                // Number-pad keys follow this machine's own Num Lock (see
+                // `numpad_vk`); a release always repeats its press's VK.
+                let vk = match numpad_vk(key, toggle_state(VK_NUMLOCK.0)) {
+                    Some(numpad) => match state {
+                        ButtonState::Pressed => {
+                            self.numpad_held.insert(key, numpad.0);
+                            numpad.0
+                        }
+                        ButtonState::Released => self.numpad_held.remove(&key).unwrap_or(numpad.0),
+                    },
+                    None => {
+                        key_to_vk(key)
+                            .ok_or_else(|| {
+                                InputError::Unsupported(format!("{key:?} has no Windows VK code"))
+                            })?
+                            .0
+                    }
+                };
+                let is_lock_key = vk == VK_NUMLOCK.0 || vk == VK_CAPITAL.0;
+                let before = is_lock_key.then(|| toggle_state(vk));
+                let result = send(keyboard_input(vk, state == ButtonState::Pressed));
                 if let Some(before) = before {
                     tracing::info!(
                         ?key,
                         ?state,
-                        scan_code = key_scan_code(vk.0),
+                        scan_code = key_scan_code(vk),
                         sent = result.is_ok(),
                         toggle_before = before,
-                        toggle_after = toggle_state(vk.0),
+                        toggle_after = toggle_state(vk),
                         "WindowsInject: lock key injected"
                     );
                 }
+                result
+            }
+            InputMessage::CapsLockState { on } => {
+                // Match the sender's Caps Lock rather than toggle blindly --
+                // see ADR-0007's Caps Lock update.
+                let before = toggle_state(VK_CAPITAL.0);
+                let result = if before == on {
+                    Ok(())
+                } else {
+                    send(keyboard_input(VK_CAPITAL.0, true))
+                        .and_then(|()| send(keyboard_input(VK_CAPITAL.0, false)))
+                };
+                tracing::info!(
+                    desired = on,
+                    toggle_before = before,
+                    pressed = before != on,
+                    sent = result.is_ok(),
+                    toggle_after = toggle_state(VK_CAPITAL.0),
+                    "WindowsInject: Caps Lock state synced"
+                );
                 result
             }
             InputMessage::MouseMove { dx, dy } => {

@@ -118,6 +118,36 @@ Clear", so it is the same physical key. `Key::NumLock` is appended
 injects it as an extended key, as Microsoft's own `keybd_event`
 documentation does.
 
+*Second follow-up, same day — Caps Lock reversed, Num Lock inert.* On
+the next run Caps Lock reached Windows but typed reversed case, and Num
+Lock had no effect on the number pad. **Caps Lock**: each machine keeps
+its own Caps Lock state, and forwarding a *toggle* only stays right while
+the two happen to agree. They stop agreeing as soon as Caps Lock is
+pressed while controlling the Mac itself (the Mac toggles, the target
+never hears of it), or if the capture's first-seen flags missed a
+change. The fix sends *state*, not toggles: new
+`InputMessage::CapsLockState { on }` (protocol 1.3, appended at wire
+index 4, pinned by `input_message_wire_indices_are_stable`). The macOS
+capture reports every Caps Lock change as the new state; `Capture`
+gains `caps_lock_state()` (macOS: `CGEventSourceFlagsState` of the HID
+system state), and `Session` sends it to a target right after
+`SwitchActive`, on the input stream, so it precedes the first key. The
+Windows injector presses Caps Lock only if its own state
+(`GetKeyState`) differs; the X11 injector does the same using the
+`Lock` modifier from `QueryPointer`; the macOS injector reports
+`Unsupported` (setting Caps Lock state on a macOS target is not
+implemented). **Num Lock**: the external keyboard's Num Lock light is
+driven by the Mac it is plugged into, so it can never show Windows' Num
+Lock; and number-pad keys were injected as fixed `VK_NUMPAD*` digits,
+which ignore Num Lock. The Windows injector now picks each number-pad
+key's VK from its own Num Lock state (`numpad_vk`: digits when on,
+Insert/End/Down/PgDn/Left/Clear/Right/Home/Up/PgUp/Delete when off, the
+standard keypad layout) and remembers the VK pressed for each held
+number-pad key so its release always matches. Operator keys and numpad
+Enter are unaffected. Whether an injected Num Lock actually toggles
+Windows' state is logged (`toggle_before`/`toggle_after`) and still to
+be confirmed on hardware.
+
 Known, documented limits of this change: keys that remain unnamed
 (macOS keypad Clear and keypad `=`, the ISO `§` key, F13+, media keys)
 are now refused cross-platform — logged, not typed as some unrelated

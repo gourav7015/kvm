@@ -22,7 +22,10 @@ pub const PROTOCOL_MAJOR: u8 = 1;
 /// - **1.2** — `Key::NumLock` appended (wire index 99). As with 1.1, a
 ///   peer on an older minor version cannot decode that one key; nothing
 ///   else changes.
-pub const PROTOCOL_MINOR: u8 = 2;
+/// - **1.3** — `InputMessage::CapsLockState` appended (wire index 4): the
+///   sender's Caps Lock state, which the receiver matches. An older peer
+///   cannot decode it; nothing else changes.
+pub const PROTOCOL_MINOR: u8 = 3;
 
 /// Checks whether a peer-reported major version is compatible with ours.
 ///

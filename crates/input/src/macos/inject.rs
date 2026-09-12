@@ -66,6 +66,10 @@ impl Inject for MacInject {
                 cg_event.post(CGEventTapLocation::HID);
                 Ok(())
             }
+            InputMessage::CapsLockState { .. } => Err(InputError::Unsupported(
+                "setting Caps Lock state on a macOS target is not implemented -- ignored"
+                    .to_string(),
+            )),
             InputMessage::MouseMove { dx, dy } => {
                 // CGEvent mouse-move events are expressed as an absolute
                 // cursor position, not a delta; `CGEvent::new_mouse_event`

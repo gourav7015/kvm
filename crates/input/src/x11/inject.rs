@@ -2,11 +2,11 @@
 //! other half of the "thin shim" alongside [`crate::x11::capture`] —
 //! pure event-shape conversion, no cross-platform translation logic.
 
-use kvm_protocol::{ButtonState, InputMessage, MouseButton, PlatformKind};
+use kvm_protocol::{ButtonState, InputMessage, Key, MouseButton, PlatformKind};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _, KEY_PRESS_EVENT,
-    KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, Window,
+    KEY_RELEASE_EVENT, KeyButMask, MOTION_NOTIFY_EVENT, Window,
 };
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
@@ -81,6 +81,33 @@ impl Inject for X11Inject {
                     ButtonState::Released => KEY_RELEASE_EVENT,
                 };
                 self.fake_input(type_, keycode, 0, 0)
+            }
+            InputMessage::CapsLockState { on } => {
+                // Match the sender's state: press Caps Lock only if the X
+                // server's own (the Lock modifier) differs -- see ADR-0007's
+                // Caps Lock update.
+                let reply = self
+                    .conn
+                    .query_pointer(self.root)
+                    .map_err(|e| {
+                        InputError::InjectFailed(format!("QueryPointer request failed: {e}"))
+                    })?
+                    .reply()
+                    .map_err(|e| {
+                        InputError::InjectFailed(format!("QueryPointer reply failed: {e}"))
+                    })?;
+                let current = u16::from(reply.mask) & u16::from(KeyButMask::LOCK) != 0;
+                if current == on {
+                    return Ok(());
+                }
+                let Some(keycode) = self.keymap.key_to_keycode(Key::CapsLock) else {
+                    return Err(InputError::Unsupported(
+                        "Caps Lock has no keycode bound on this X server's current keyboard mapping"
+                            .to_string(),
+                    ));
+                };
+                self.fake_input(KEY_PRESS_EVENT, keycode, 0, 0)?;
+                self.fake_input(KEY_RELEASE_EVENT, keycode, 0, 0)
             }
             InputMessage::MouseMove { dx, dy } => {
                 let root_x = dx.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;

@@ -699,6 +699,21 @@ mod tests {
     }
 
     #[test]
+    fn caps_lock_state_is_forwarded_only_while_forwarding() {
+        let mut router = router_with_right_neighbor();
+        let state = InputMessage::CapsLockState { on: true };
+        assert_eq!(router.handle_captured(state.clone()), vec![]);
+        router.handle_captured(InputMessage::MouseMove { dx: 600, dy: 0 });
+        assert_eq!(
+            router.handle_captured(state.clone()),
+            vec![Effect::Send {
+                to: NEIGHBOR,
+                message: state,
+            }]
+        );
+    }
+
+    #[test]
     fn the_emergency_chord_does_nothing_special_while_already_local() {
         let mut router = router_with_right_neighbor();
         press(&mut router, Key::ControlLeft);

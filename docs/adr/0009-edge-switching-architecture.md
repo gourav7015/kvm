@@ -1269,3 +1269,37 @@ The relay now also logs cursor visibility every tick while forwarding,
 so a gesture that re-shows the cursor is timestamped next time, and
 `mac_gesture_probe` (decision 21) is still to be run. No gesture fix
 until that evidence exists.
+
+### 23. Trackpad gestures are dropped while forwarding
+
+**Update (2026-09-12):** the acceptance run of `c3cb1d4` confirmed the
+return landing (decision 22). It also pinned down the gesture problem.
+
+**Evidence.** The hub log of that run shows the cursor visibility
+reading flip to `visible=true` while forwarding, at the time of the
+user's three-finger swipe — the cursor hidden by decision 20 was shown
+again, and the user saw both cursors move together until the next
+switch hid it again. `mac_gesture_probe` (decision 21) measured what a
+three-finger swipe produces on this Mac: event types **29** (776 events)
+and **30** (55) at both the HID and session tap locations; with
+`--drop-gestures`, dropping them at the HID tap removed every one of
+them from the session tap (0 and 0). `MacCapture`'s tap never saw them:
+`core-graphics`'s `CGEventType` has no variant for either, so they could
+not even be registered for.
+
+**Fix.** `MacCapture` installs a second HID-level tap, on the same run
+loop and thread, registered only for `GESTURE_EVENT_TYPES` (29, 30) via
+`CGEventTapCreate` directly. It drops them exactly while local input is
+suppressed (the same flag the main tap uses) and passes them through
+otherwise, so gestures work normally on the Mac itself; it re-enables
+itself on the OS's tap-disabled notifications, like the main tap; it is
+torn down on the capture thread after the run loop returns, with its
+port invalidated before its context is freed. Creation failure is logged
+and non-fatal. Gestures are not forwarded — there is no protocol for
+them — only kept from acting locally. The decision is a pure function,
+`gesture_tap_action`, unit-tested.
+
+**Limit.** Only the two measured types are dropped. Other gesture types
+(e.g. rotate) were not produced in the measurement and are not touched.
+
+**Open**: real Mac->Windows acceptance of the gesture fix.

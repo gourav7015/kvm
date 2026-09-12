@@ -244,32 +244,6 @@ fn anchored_delta(anchor: CGPoint, current: CGPoint) -> (i32, i32) {
     )
 }
 
-/// The release that completes a Caps Lock toggle into a full tap: `Some`
-/// only for the `CapsLock` press [`to_input_message`] reports for a
-/// `FlagsChanged` event (see `modifier_transition`). The capture callback
-/// sends it immediately after that press.
-pub fn caps_lock_tap_release(
-    event_type: CGEventType,
-    message: &InputMessage,
-) -> Option<InputMessage> {
-    match (event_type, message) {
-        (
-            CGEventType::FlagsChanged,
-            InputMessage::Key {
-                key: Key::CapsLock,
-                state: ButtonState::Pressed,
-                ..
-            },
-        ) => Some(InputMessage::Key {
-            key: Key::CapsLock,
-            state: ButtonState::Released,
-            repeat: false,
-            source_os: PlatformKind::MacOs,
-        }),
-        _ => None,
-    }
-}
-
 /// The `CGEventFlags` bit that tracks whether *any* key in `key`'s
 /// modifier category is currently held, or `None` for a key with no
 /// such category (including Caps Lock, deliberately excluded — its
@@ -307,20 +281,16 @@ fn modifier_transition(
     new_flags: CGEventFlags,
 ) -> Option<InputMessage> {
     // Caps Lock is a toggle, not a held modifier: macOS reports each
-    // on/off change of its flag, not the key's own down/up. Every change
-    // is reported as a press, completed by a release in
-    // `caps_lock_tap_release`, so the receiver sees one full tap per toggle
-    // and toggles its own Caps Lock to match. Real hardware: Caps Lock
-    // previously never reached the target at all.
+    // on/off change of its flag, not the key's own down/up. Each change is
+    // reported as the new *state*, which the receiver matches -- never as
+    // a press to toggle with, because the two machines' Caps Lock states
+    // are independent and a toggle only stays right while they happen to
+    // agree (real hardware: they drifted, and the target typed reversed
+    // case). See ADR-0007's Caps Lock update.
     if key == Key::CapsLock {
-        let toggled = previous_flags.contains(CGEventFlags::CGEventFlagAlphaShift)
-            != new_flags.contains(CGEventFlags::CGEventFlagAlphaShift);
-        return toggled.then_some(InputMessage::Key {
-            key: Key::CapsLock,
-            state: ButtonState::Pressed,
-            repeat: false,
-            source_os: PlatformKind::MacOs,
-        });
+        let was_on = previous_flags.contains(CGEventFlags::CGEventFlagAlphaShift);
+        let now_on = new_flags.contains(CGEventFlags::CGEventFlagAlphaShift);
+        return (was_on != now_on).then_some(InputMessage::CapsLockState { on: now_on });
     }
     let mask = modifier_mask_for_key(key)?;
     let was_set = previous_flags.contains(mask);
@@ -677,25 +647,19 @@ mod tests {
         assert_eq!(modifier_transition(Key::ShiftLeft, shift, shift), None);
     }
 
-    /// Regression test for Caps Lock never reaching the target (real
-    /// hardware, ADR-0007's 2026-09-12 update): turning it on *and* turning
-    /// it off must each produce a press.
+    /// Regression test for the reversed Caps Lock seen on real hardware
+    /// (ADR-0007's Caps Lock update): a change reports the new state, so
+    /// the receiver can match it rather than blindly toggle.
     #[test]
-    fn caps_lock_on_and_off_each_produce_a_press() {
-        let caps_press = Some(InputMessage::Key {
-            key: Key::CapsLock,
-            state: ButtonState::Pressed,
-            repeat: false,
-            source_os: PlatformKind::MacOs,
-        });
+    fn caps_lock_changes_report_the_new_state() {
         let alpha = CGEventFlags::CGEventFlagAlphaShift;
         assert_eq!(
             modifier_transition(Key::CapsLock, CGEventFlags::empty(), alpha),
-            caps_press
+            Some(InputMessage::CapsLockState { on: true })
         );
         assert_eq!(
             modifier_transition(Key::CapsLock, alpha, CGEventFlags::empty()),
-            caps_press
+            Some(InputMessage::CapsLockState { on: false })
         );
     }
 
@@ -707,38 +671,6 @@ mod tests {
             None
         );
         assert_eq!(modifier_transition(Key::CapsLock, alpha, alpha), None);
-    }
-
-    #[test]
-    fn a_caps_lock_toggle_is_completed_into_a_full_tap() {
-        let press = InputMessage::Key {
-            key: Key::CapsLock,
-            state: ButtonState::Pressed,
-            repeat: false,
-            source_os: PlatformKind::MacOs,
-        };
-        assert_eq!(
-            caps_lock_tap_release(CGEventType::FlagsChanged, &press),
-            Some(InputMessage::Key {
-                key: Key::CapsLock,
-                state: ButtonState::Released,
-                repeat: false,
-                source_os: PlatformKind::MacOs,
-            })
-        );
-        // Nothing else is ever completed: other modifiers keep their real
-        // down/up, and no other event type is touched.
-        let shift = InputMessage::Key {
-            key: Key::ShiftLeft,
-            state: ButtonState::Pressed,
-            repeat: false,
-            source_os: PlatformKind::MacOs,
-        };
-        assert_eq!(
-            caps_lock_tap_release(CGEventType::FlagsChanged, &shift),
-            None
-        );
-        assert_eq!(caps_lock_tap_release(CGEventType::KeyDown, &press), None);
     }
 
     #[test]

@@ -453,15 +453,16 @@ impl Session {
             return Err(CoreError::UnknownPeer(to));
         };
 
-        match stream.send(&message).await {
+        let switched = matches!(
+            message,
+            Message::Control(ControlMessage::SwitchActive { .. })
+        );
+        let result = match stream.send(&message).await {
             Ok(()) => {
                 tracing::trace!(?to, "send succeeded");
                 // Becoming the active target starts its liveness clock --
                 // see `TARGET_LIVENESS_TIMEOUT`.
-                if matches!(
-                    message,
-                    Message::Control(ControlMessage::SwitchActive { .. })
-                ) {
+                if switched {
                     self.last_heard.insert(to, Instant::now());
                 }
                 Ok(())
@@ -473,6 +474,44 @@ impl Session {
             }
             Err(e) => {
                 tracing::warn!(?to, error = %e, "send failed");
+                self.remove_peer(to, local_capture);
+                Err(CoreError::Net(e))
+            }
+        };
+        // A new target gets this device's Caps Lock state before any key,
+        // on the same input stream the keys use -- see ADR-0007's Caps Lock
+        // update.
+        if switched
+            && result.is_ok()
+            && self.peers.contains_key(&to)
+            && let Some(on) = local_capture.caps_lock_state()
+        {
+            return self.send_caps_lock_state(to, on, local_capture).await;
+        }
+        result
+    }
+
+    /// Sends this device's Caps Lock state to `to` on its input stream.
+    async fn send_caps_lock_state(
+        &mut self,
+        to: DeviceId,
+        on: bool,
+        local_capture: &mut dyn Capture,
+    ) -> Result<(), CoreError> {
+        let Some(peer) = self.peers.get_mut(&to) else {
+            return Err(CoreError::UnknownPeer(to));
+        };
+        tracing::info!(?to, on, "syncing Caps Lock state to the new target");
+        let message = Message::Input(InputMessage::CapsLockState { on });
+        match peer.streams.input.send(&message).await {
+            Ok(()) => Ok(()),
+            Err(NetError::ConnectionClosed) => {
+                tracing::warn!(?to, "Caps Lock sync failed: connection closed");
+                self.remove_peer(to, local_capture);
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(?to, error = %e, "Caps Lock sync failed");
                 self.remove_peer(to, local_capture);
                 Err(CoreError::Net(e))
             }

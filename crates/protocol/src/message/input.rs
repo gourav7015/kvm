@@ -199,6 +199,16 @@ pub enum InputMessage {
         dx: i32,
         dy: i32,
     },
+    /// Protocol 1.3, appended (postcard encodes a variant as its index):
+    /// the sender's own Caps Lock state, sent when it becomes the active
+    /// source for this receiver and on every change. Caps Lock is a
+    /// toggle each machine keeps separately, so forwarding presses let the
+    /// two drift apart (real hardware: a press made while controlling the
+    /// sender's own screen left the target's Caps Lock reversed). The
+    /// receiver sets its own Caps Lock to `on` — see ADR-0007.
+    CapsLockState {
+        on: bool,
+    },
 }
 
 #[cfg(test)]
@@ -383,5 +393,37 @@ mod tests {
     #[test]
     fn mouse_scroll_round_trips() {
         round_trip(Message::Input(InputMessage::MouseScroll { dx: -5, dy: 5 }));
+    }
+
+    #[test]
+    fn caps_lock_state_round_trips_both_states() {
+        round_trip(Message::Input(InputMessage::CapsLockState { on: true }));
+        round_trip(Message::Input(InputMessage::CapsLockState { on: false }));
+    }
+
+    /// Same reasoning as `key_wire_indices_are_stable`, for `InputMessage`
+    /// itself: the protocol 1.3 variant must be appended, never inserted.
+    #[test]
+    fn input_message_wire_indices_are_stable() {
+        let index = |message: InputMessage| postcard::to_allocvec(&message).unwrap()[0];
+        assert_eq!(
+            index(InputMessage::Key {
+                key: Key::A,
+                state: ButtonState::Pressed,
+                repeat: false,
+                source_os: PlatformKind::MacOs,
+            }),
+            0
+        );
+        assert_eq!(index(InputMessage::MouseMove { dx: 0, dy: 0 }), 1);
+        assert_eq!(
+            index(InputMessage::MouseButton {
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            }),
+            2
+        );
+        assert_eq!(index(InputMessage::MouseScroll { dx: 0, dy: 0 }), 3);
+        assert_eq!(index(InputMessage::CapsLockState { on: true }), 4);
     }
 }

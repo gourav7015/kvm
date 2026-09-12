@@ -138,6 +138,8 @@ struct FakeCapture {
     /// What `last_pointer_location` reports -- the real location carried
     /// by the latest captured event (ADR-0009 decision 21).
     location: Option<(i32, i32)>,
+    /// What `caps_lock_state` reports (ADR-0007's Caps Lock update).
+    caps_lock: Option<bool>,
 }
 
 impl kvm_input::Capture for FakeCapture {
@@ -153,6 +155,10 @@ impl kvm_input::Capture for FakeCapture {
 
     fn last_pointer_location(&self) -> Option<(i32, i32)> {
         self.location
+    }
+
+    fn caps_lock_state(&self) -> Option<bool> {
+        self.caps_lock
     }
 }
 
@@ -1564,4 +1570,80 @@ async fn after_returning_home_the_first_real_move_re_anchors_the_local_position(
         session.ownership_state(),
         OwnershipState::Forwarding { .. }
     ));
+}
+
+/// Regression test for the reversed Caps Lock seen on real hardware
+/// (ADR-0007's Caps Lock update): the two machines keep independent Caps
+/// Lock states, so a new target must be told this device's state before
+/// the first key it injects -- over the real transport, in order.
+#[tokio::test]
+async fn a_new_target_gets_this_devices_caps_lock_state_before_any_key() {
+    let hub = Device::new([0x7B; 32]);
+    let target = Device::new([0x7C; 32]);
+    let (hub_peer, mut target_peer) = connect_pair(&hub, &target).await;
+
+    let received = Arc::new(Mutex::new(Vec::new()));
+    {
+        let received = received.clone();
+        tokio::spawn(async move {
+            let mut geometry = FakeGeometry::new((0, 0));
+            let mut inject = FakeInject { received };
+            let _ = run_target(&mut target_peer, &mut geometry, &mut inject).await;
+        });
+    }
+
+    let mut session = Session::new(
+        hub.device_id,
+        two_device_layout(hub.device_id, target.device_id),
+        (1000, 800),
+        (500, 400),
+    );
+    session.add_peer(target.device_id, hub_peer, (1000, 800));
+    let mut geometry = FakeGeometry::new((500, 400));
+    let mut capture = FakeCapture {
+        caps_lock: Some(true),
+        ..FakeCapture::default()
+    };
+
+    session
+        .handle_captured(
+            InputMessage::MouseMove { dx: 600, dy: 0 },
+            &mut geometry,
+            &mut capture,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        session.ownership_state(),
+        OwnershipState::Forwarding { .. }
+    ));
+    session
+        .handle_captured(
+            key_event(Key::A, ButtonState::Pressed),
+            &mut geometry,
+            &mut capture,
+        )
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let non_motion = loop {
+        let non_motion: Vec<InputMessage> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| !matches!(m, InputMessage::MouseMove { .. }))
+            .cloned()
+            .collect();
+        if non_motion.len() >= 2 {
+            break non_motion;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "target received only {non_motion:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(non_motion[0], InputMessage::CapsLockState { on: true });
+    assert_eq!(non_motion[1], key_event(Key::A, ButtonState::Pressed));
 }

@@ -5,15 +5,15 @@
 use kvm_protocol::Key;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_A, VK_ADD, VK_B,
-    VK_BACK, VK_C, VK_CAPITAL, VK_D, VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_E, VK_END,
-    VK_ESCAPE, VK_F, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11,
-    VK_F12, VK_G, VK_H, VK_HOME, VK_I, VK_J, VK_K, VK_L, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT,
-    VK_LWIN, VK_M, VK_MULTIPLY, VK_N, VK_NEXT, VK_NUMLOCK, VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2,
-    VK_NUMPAD3, VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, VK_O,
-    VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA,
-    VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_P, VK_PRIOR, VK_Q, VK_R, VK_RCONTROL, VK_RETURN,
-    VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_S, VK_SPACE, VK_SUBTRACT, VK_T, VK_TAB, VK_U, VK_UP,
-    VK_V, VK_W, VK_X, VK_Y, VK_Z,
+    VK_BACK, VK_C, VK_CAPITAL, VK_CLEAR, VK_D, VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_E,
+    VK_END, VK_ESCAPE, VK_F, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10,
+    VK_F11, VK_F12, VK_G, VK_H, VK_HOME, VK_I, VK_INSERT, VK_J, VK_K, VK_L, VK_LCONTROL, VK_LEFT,
+    VK_LMENU, VK_LSHIFT, VK_LWIN, VK_M, VK_MULTIPLY, VK_N, VK_NEXT, VK_NUMLOCK, VK_NUMPAD0,
+    VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8,
+    VK_NUMPAD9, VK_O, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7,
+    VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_P, VK_PRIOR, VK_Q, VK_R,
+    VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_S, VK_SPACE, VK_SUBTRACT,
+    VK_T, VK_TAB, VK_U, VK_UP, VK_V, VK_W, VK_X, VK_Y, VK_Z,
 };
 
 /// Translates a raw Windows virtual-key code into a normalized [`Key`].
@@ -133,6 +133,31 @@ pub fn vk_to_key(vk: VIRTUAL_KEY) -> Key {
         // numpad Enter reads back as `Key::Enter` here.
         other => Key::Unknown(other.0 as u32),
     }
+}
+
+/// The VK a number-pad key produces on this machine given its own Num
+/// Lock state, or `None` for any other key. With Num Lock off, a PC's
+/// number pad types navigation keys instead of digits (7 = Home, 8 = Up,
+/// 0 = Insert, . = Delete, ...) — the standard keypad layout. Real
+/// hardware: number-pad keys were injected as fixed `VK_NUMPAD*` digits, so
+/// Windows' Num Lock had no effect on them. The operator keys and numpad
+/// Enter don't depend on Num Lock and return `None` (see [`key_to_vk`]).
+pub fn numpad_vk(key: Key, num_lock_on: bool) -> Option<VIRTUAL_KEY> {
+    let (digit, navigation) = match key {
+        Key::Numpad0 => (VK_NUMPAD0, VK_INSERT),
+        Key::Numpad1 => (VK_NUMPAD1, VK_END),
+        Key::Numpad2 => (VK_NUMPAD2, VK_DOWN),
+        Key::Numpad3 => (VK_NUMPAD3, VK_NEXT),
+        Key::Numpad4 => (VK_NUMPAD4, VK_LEFT),
+        Key::Numpad5 => (VK_NUMPAD5, VK_CLEAR),
+        Key::Numpad6 => (VK_NUMPAD6, VK_RIGHT),
+        Key::Numpad7 => (VK_NUMPAD7, VK_HOME),
+        Key::Numpad8 => (VK_NUMPAD8, VK_UP),
+        Key::Numpad9 => (VK_NUMPAD9, VK_PRIOR),
+        Key::NumpadDecimal => (VK_DECIMAL, VK_DELETE),
+        _ => return None,
+    };
+    Some(if num_lock_on { digit } else { navigation })
 }
 
 /// The inverse of [`vk_to_key`], for injection. Returns `None` for a
@@ -362,6 +387,49 @@ mod tests {
         // `VK_RETURN`, which reads back as `Key::Enter` — see
         // `numpad_enter_injects_as_return`.
     ];
+
+    /// Regression test for Num Lock having no effect on the number pad
+    /// (real hardware, ADR-0007's Num Lock update).
+    #[test]
+    fn number_pad_keys_follow_num_lock() {
+        assert_eq!(numpad_vk(Key::Numpad7, true), Some(VK_NUMPAD7));
+        assert_eq!(numpad_vk(Key::Numpad7, false), Some(VK_HOME));
+        assert_eq!(numpad_vk(Key::Numpad8, false), Some(VK_UP));
+        assert_eq!(numpad_vk(Key::Numpad0, false), Some(VK_INSERT));
+        assert_eq!(numpad_vk(Key::NumpadDecimal, false), Some(VK_DELETE));
+        // With Num Lock on, every one of them is exactly its digit VK.
+        for key in [
+            Key::Numpad0,
+            Key::Numpad1,
+            Key::Numpad2,
+            Key::Numpad3,
+            Key::Numpad4,
+            Key::Numpad5,
+            Key::Numpad6,
+            Key::Numpad7,
+            Key::Numpad8,
+            Key::Numpad9,
+            Key::NumpadDecimal,
+        ] {
+            assert_eq!(numpad_vk(key, true), key_to_vk(key));
+        }
+    }
+
+    #[test]
+    fn operator_keys_and_everything_else_ignore_num_lock() {
+        for key in [
+            Key::NumpadAdd,
+            Key::NumpadSubtract,
+            Key::NumpadMultiply,
+            Key::NumpadDivide,
+            Key::NumpadEnter,
+            Key::Digit7,
+            Key::Home,
+        ] {
+            assert_eq!(numpad_vk(key, false), None);
+            assert_eq!(numpad_vk(key, true), None);
+        }
+    }
 
     #[test]
     fn num_lock_maps_to_vk_numlock() {

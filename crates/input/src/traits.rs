@@ -47,6 +47,14 @@ pub trait Capture: Send {
     fn last_pointer_location(&self) -> Option<(i32, i32)> {
         None
     }
+
+    /// Whether this device's Caps Lock is currently on, or `None` if the
+    /// backend doesn't report it. Sent to a target when it becomes the
+    /// active one, so the two machines' independent Caps Lock states start
+    /// out matched — see ADR-0007's Caps Lock update.
+    fn caps_lock_state(&self) -> Option<bool> {
+        None
+    }
 }
 
 /// Injects a normalized [`InputMessage`] as local keyboard/mouse input.

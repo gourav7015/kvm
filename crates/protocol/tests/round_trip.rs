@@ -114,6 +114,7 @@ fn arb_input() -> impl Strategy<Value = Message> {
         }),
         (any::<i32>(), any::<i32>())
             .prop_map(|(dx, dy)| Message::Input(InputMessage::MouseScroll { dx, dy })),
+        any::<bool>().prop_map(|on| Message::Input(InputMessage::CapsLockState { on })),
     ]
 }
 
